@@ -167,7 +167,7 @@ async function t(name, fn) {
 
   await t('stale mobile-money prompt expires so the rider can retry another method', async () => {
     const { r, d, id } = await startedRide(); await api(tok(d, 'driver'), 'POST', `/driver/rides/${id}/reached-destination`);
-    await db.query("INSERT INTO payment_transactions(user_id,amount,provider,status,external_reference,metadata,created_at) VALUES(?,?,?,?,?,?,DATE_SUB(UTC_TIMESTAMP(), INTERVAL 10 MINUTE))", [r, 1000, 'snippe', 'pending', `T-${id}-${Date.now()}`, JSON.stringify({ channel: 'ride_payment', rideId: String(id) })]);
+    await db.query("INSERT INTO payment_transactions(user_id,amount,provider,status,external_reference,metadata,created_at) VALUES(?,?,?,?,?,?,DATE_SUB(UTC_TIMESTAMP(), INTERVAL 10 MINUTE))", [r, 1000, 'PayGrid', 'pending', `T-${id}-${Date.now()}`, JSON.stringify({ channel: 'ride_payment', rideId: String(id) })]);
     const live = await api(tok(r, 'rider'), 'GET', `/rider/rides/${id}`); assert.strictEqual(live.data.payment_status, 'pending', 'no longer "processing"');
     const pay = await api(tok(r, 'rider'), 'POST', `/rider/rides/${id}/pay`, { method: 'cash' }); assert.strictEqual(pay.status, 200);
   });

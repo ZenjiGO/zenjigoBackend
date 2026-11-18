@@ -14,11 +14,11 @@ const rideService = require('../services/ride.service');
 const finance = require('../services/driver_finance.service');
 
 /**
- * Snippe webhook + callback
+ * PayGrid webhook + callback
  * POST /api/v1/payments/webhook
  * Dashboard: set webhook URL to https://YOUR_API/api/v1/payments/webhook
- * Headers: X-Webhook-Signature, X-Webhook-Timestamp
- * Docs: https://docs.snippe.sh/docs/2026-01-25/webhooks
+ * Header: X-MeetPay-Signature: sha256=<hmac>
+ * Docs: https://paydocs.briq.tz/guides/webhooks/verify-signatures
  */
 router.post('/webhook', async (req, res) => {
   try {
@@ -27,24 +27,18 @@ router.post('/webhook', async (req, res) => {
       : Buffer.from(JSON.stringify(req.body || {}));
 
     const sig =
-      req.get('x-webhook-signature') ||
-      req.get('X-Webhook-Signature') ||
       req.get('x-meetpay-signature') ||
-      req.get('X-MeetPay-Signature') ||
       req.get('x-paygrid-signature') ||
       req.get('x-signature') ||
       '';
-    const ts =
-      req.get('x-webhook-timestamp') ||
-      req.get('X-Webhook-Timestamp') ||
-      '';
 
-    const secret = process.env.SNIPPE_WEBHOOK_SECRET || process.env.PAYGRID_WEBHOOK_SECRET || '';
+    const secret = process.env.PAYGRID_WEBHOOK_SECRET || '';
     const skipSig =
+      process.env.ALLOW_UNSIGNED_WEBHOOKS === 'true' &&
       process.env.NODE_ENV !== 'production' &&
       (!secret || String(secret).includes('CHANGE_ME'));
 
-    if (!skipSig && !verifySignature(rawBuf, sig, ts)) {
+    if (!skipSig && !verifySignature(rawBuf, sig)) {
       return res.status(401).json({ success: false, message: 'Invalid webhook signature' });
     }
 
@@ -92,7 +86,16 @@ router.post('/webhook', async (req, res) => {
       });
     }
 
+    // A payment already marked 'success' is only a no-op for wallet top-ups. For ride payments the
+    // ride completion may have failed after the payment was marked (provider got a 5xx and retried);
+    // re-run the idempotent ride confirmation so payment and ride can never diverge.
     if (payment.status === 'success') {
+      const chDone = paymentChannel(payment);
+      if (chDone.channel === 'ride_payment' && chDone.rideId) {
+        await rideService.confirmRidePaymentFromProvider(Number(chDone.rideId), payment.user_id, {
+          reference: payment.external_reference, amount: payment.amount
+        });
+      }
       return res.json({ success: true, data: { paymentId: payment.id, status: 'success' } });
     }
 
@@ -121,7 +124,7 @@ router.post('/webhook', async (req, res) => {
       const p = await completeWalletTopup(
         payment.id,
         event.externalReference || payment.external_reference,
-        'snippe',
+        'paygrid',
         event.amount
       );
       return res.json({ success: true, data: { paymentId: p.id, status: p.status } });
@@ -132,8 +135,10 @@ router.post('/webhook', async (req, res) => {
       data: { paymentId: payment.id, status: payment.status }
     });
   } catch (e) {
-    console.error('[Snippe webhook]', e.message);
-    return res.status(e.statusCode || 500).json({ success: false, message: e.message });
+    console.error('[PayGrid webhook]', e.message);
+    // 5xx => provider retries (processing is idempotent). 4xx only for genuinely bad requests.
+    const code = e.statusCode && e.statusCode < 500 ? e.statusCode : 500;
+    return res.status(code).json({ success: false, message: code === 500 ? 'Webhook processing failed' : e.message });
   }
 });
 
@@ -142,7 +147,7 @@ router.get('/status', (req, res) => {
   res.json({
     success: true,
     data: {
-      provider: 'snippe',
+      provider: 'paygrid',
       configured: isConfigured(),
       baseUrl: baseUrl(),
       webhookPath: '/api/v1/payments/webhook'

@@ -29,31 +29,21 @@ exports.transactions = asyncHandler(async (req, res) => {
 
 /**
  * POST /rider/wallet/topup
- * Body: { amount, phone?, currency?, paymentMethod?: 'momo'|'card'|'bank', callbackUrl? }
- * - Mobile money: Snippe USSD push (phone required)
- * - Card / bank: Snippe hosted card checkout (returns paymentUrl)
- * Wallet is credited only after the Snippe webhook confirms success.
+ * Body: { amount, phone, currency? }
+ * Initiates PayGrid mobile-money collect and returns pending paymentId.
+ * Wallet is credited only after the PayGrid webhook confirms success.
  */
 exports.topup = asyncHandler(async (req, res) => {
   const amount = Number(req.body.amount);
   if (!amount || amount <= 0) throw ApiError.badRequest('Amount must be greater than zero.');
 
-  // Raw card data must never reach our servers (PCI-DSS). Card numbers are authorised on the
-  // provider's hosted checkout; we only accept non-sensitive display facts (brand / last4 / holder).
-  const RAW_CARD_KEYS = ['cardNumber', 'card_number', 'pan', 'number', 'cvv', 'cvc', 'securityCode', 'expiry', 'expiryDate'];
-  if (RAW_CARD_KEYS.some((k) => req.body[k] != null) || (req.body.card && RAW_CARD_KEYS.some((k) => req.body.card[k] != null))) {
-    throw ApiError.badRequest('Do not send full card details to this API. Card numbers are entered on the secure checkout only.');
-  }
-
-  const paymentMethod = String(req.body.paymentMethod || req.body.method || 'momo').toLowerCase();
-  const isCard = paymentMethod === 'card' || paymentMethod === 'bank' || paymentMethod === 'bank_card';
-
+  // Prefer explicit phone; fall back to authenticated user's phone from DB
   let phone = req.body.phone || req.body.msisdn || null;
   if (!phone) {
     const users = await db.query('SELECT phone FROM users WHERE id = ? LIMIT 1', [req.user.sub]);
     phone = users[0]?.phone || null;
   }
-  if (!isCard && !phone) {
+  if (!phone) {
     throw ApiError.badRequest(
       'Phone number is required for mobile money top-up. Pass "phone" in the body or ensure your profile has a phone number.'
     );
@@ -63,16 +53,16 @@ exports.topup = asyncHandler(async (req, res) => {
     userId: req.user.sub,
     amount,
     phone,
-    currency: req.body.currency || config.ride.currency || 'TZS',
-    paymentMethod,
-    callbackUrl: req.body.callbackUrl || null,
-    cancelUrl: req.body.cancelUrl || null,
-    card: isCard ? req.body.card || null : null
+    currency: req.body.currency || config.ride.currency || 'TZS'
   });
 
   ok(res, result, result.message || 'Top-up initiated', 201);
 });
 
+/**
+ * GET /rider/wallet/topup/:id
+ * Poll status of a top-up payment.
+ */
 exports.topupStatus = asyncHandler(async (req, res) => {
   const rows = await db.query(
     `SELECT id, amount, currency, provider, status, external_reference AS externalReference, created_at AS createdAt
@@ -83,6 +73,22 @@ exports.topupStatus = asyncHandler(async (req, res) => {
   );
   if (!rows.length) throw ApiError.notFound('Payment not found.');
   ok(res, rows[0]);
+});
+
+exports.charge = asyncHandler(async (req, res) => {
+  ok(
+    res,
+    {
+      balance: await ride.chargeWallet(
+        req.user.sub,
+        Number(req.body.amount),
+        'adjustment',
+        null,
+        'Wallet debit'
+      )
+    },
+    'Wallet charged'
+  );
 });
 
 exports.topupCancel = asyncHandler(async (req, res) => {

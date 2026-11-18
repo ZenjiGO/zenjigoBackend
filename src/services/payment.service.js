@@ -1,23 +1,18 @@
 /**
- * Payment service — wallet top-ups & Snippe webhooks
- * Docs: https://docs.snippe.sh/
+ * Payment service — wallet top-ups & PayGrid webhooks
+ * Docs: https://paydocs.briq.tz/
  */
-const crypto = require('crypto');
 const db = require('../config/db');
 const ApiError = require('../utils/ApiError');
 const config = require('../config/env');
 const provider = require('./payment.provider');
 const finance = require('./driver_finance.service');
 
-function getWebhookSecret() {
-  return config.payment.webhookSecret || process.env.SNIPPE_WEBHOOK_SECRET || '';
+function verifySignature(rawBody, signature) {
+  return provider.verifyWebhook(rawBody, signature);
 }
 
-function verifySignature(rawBody, signature, timestamp) {
-  return provider.verifyWebhook(rawBody, signature, timestamp);
-}
-
-async function completeWalletTopup(paymentId, externalReference, providerName = 'snippe', confirmedAmount = null) {
+async function completeWalletTopup(paymentId, externalReference, providerName = 'paygrid', confirmedAmount = null) {
   return db.transaction(async (conn) => {
     const [rows] = await conn.query(
       'SELECT * FROM payment_transactions WHERE id = ? FOR UPDATE',
@@ -60,7 +55,7 @@ async function completeWalletTopup(paymentId, externalReference, providerName = 
       `INSERT INTO wallet_transactions
          (user_id, type, amount, balance_before, balance_after, reference_type, reference_id, payment_method, description, status)
        VALUES (?, 'topup', ?, ?, ?, 'payment', ?, ?, 'Wallet top-up', 'success')`,
-      [p.user_id, p.amount, before, after, p.id, providerName || 'snippe']
+      [p.user_id, p.amount, before, after, p.id, providerName || 'paygrid']
     );
     return { ...p, status: 'success' };
   });
@@ -76,27 +71,11 @@ async function failPayment(paymentId, reason) {
   );
 }
 
-/** Keep only non-sensitive card facts (never PAN / CVV / full expiry). */
-function sanitizeCardInfo(card) {
-  if (!card || typeof card !== 'object') return null;
-  const last4 = String(card.last4 || card.cardLast4 || '').replace(/\D/g, '').slice(-4);
-  const brand = String(card.brand || card.cardBrand || '').replace(/[^a-z ]/gi, '').slice(0, 20);
-  const holder = String(card.holder || card.holderName || card.cardHolder || '')
-    .replace(/[^\p{L}\p{N} .'-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 60);
-  if (!last4 && !brand && !holder) return null;
-  return { last4: last4 || null, brand: brand || null, holder: holder || null };
-}
-
-async function initiateTopup({ userId, amount, phone, currency, customer, network, paymentMethod, callbackUrl, cancelUrl, card }) {
+async function initiateTopup({ userId, amount, phone, currency, customer, network }) {
   const amt = Number(amount);
   if (!amt || amt < 500) throw ApiError.badRequest('Minimum top-up amount is 500 TZS.');
+  if (!phone) throw ApiError.badRequest('Phone number is required for mobile money top-up.');
 
-  const method = String(paymentMethod || 'momo').toLowerCase();
-  const isCard = method === 'card' || method === 'bank' || method === 'bank_card';
-
-  if (!isCard && !phone) throw ApiError.badRequest('Phone number is required for mobile money top-up.');
-
-  const cardInfo = isCard ? sanitizeCardInfo(card) : null;
   const reference = `ZENJIGO-TOPUP-${userId}-${Date.now()}`;
   const insert = await db.query(
     `INSERT INTO payment_transactions
@@ -106,20 +85,15 @@ async function initiateTopup({ userId, amount, phone, currency, customer, networ
       userId,
       amt,
       currency || config.ride.currency || 'TZS',
-      'snippe',
+      'paygrid',
       reference,
-      JSON.stringify({
-        phone: phone || null,
-        requestedBy: userId,
-        channel: isCard ? 'wallet_topup_card' : 'wallet_topup',
-        paymentMethod: method,
-        card: cardInfo
-      })
+      JSON.stringify({ phone, requestedBy: userId, channel: 'wallet_topup' })
     ]
   );
   const paymentId = insert.insertId;
 
   try {
+    // Load user profile for customer object required by PayGrid
     let cust = customer;
     if (!cust) {
       const users = await db.query(
@@ -133,41 +107,18 @@ async function initiateTopup({ userId, amount, phone, currency, customer, networ
         lastname: parts.slice(1).join(' ') || 'User',
         email: u.email || `user${userId}@zenjigo.online`
       };
-      if (!phone && u.phone) phone = u.phone;
-      // Billing name on the hosted card checkout follows the name on the card the rider typed.
-      if (isCard && cardInfo?.holder) {
-        const hp = cardInfo.holder.split(/\s+/);
-        cust.firstname = hp[0] || cust.firstname;
-        cust.lastname = hp.slice(1).join(' ') || cust.lastname;
-      }
     }
 
-    let result;
-    if (isCard) {
-      result = await provider.createCardPayment({
-        amount: amt,
-        currency: currency || config.ride.currency || 'TZS',
-        userId,
-        phone,
-        reference,
-        customer: cust,
-        callbackUrl,
-        cancelCallbackUrl: cancelUrl,
-        channel: 'wallet_topup_card',
-        metadata: { paymentId, paymentMethod: method }
-      });
-    } else {
-      result = await provider.initiateCollect({
-        amount: amt,
-        currency: currency || config.ride.currency || 'TZS',
-        userId,
-        phone,
-        reference,
-        customer: cust,
-        network,
-        metadata: { paymentId }
-      });
-    }
+    const result = await provider.initiateCollect({
+      amount: amt,
+      currency: currency || config.ride.currency || 'TZS',
+      userId,
+      phone,
+      reference,
+      customer: cust,
+      network,
+      metadata: { paymentId }
+    });
 
     if (result.externalReference && result.externalReference !== reference) {
       await db.query(
@@ -181,15 +132,7 @@ async function initiateTopup({ userId, amount, phone, currency, customer, networ
       status: result.status || 'pending',
       externalReference: result.externalReference || reference,
       provider: result.provider,
-      paymentUrl: result.paymentUrl || null,
-      paymentMethod: method,
-      amount: amt,
-      card: cardInfo,
-      message: isCard
-        ? (result.paymentUrl
-            ? 'Authorise the card payment on the secure checkout. Your wallet is credited once the bank confirms it.'
-            : 'Card payment initiated. Complete checkout to credit your wallet.')
-        : 'Confirm the payment prompt on your phone. Your wallet updates when payment completes.'
+      message: 'Confirm the payment prompt on your phone. Your wallet updates when payment completes.'
     };
   } catch (err) {
     await failPayment(paymentId, err.message);
@@ -197,8 +140,20 @@ async function initiateTopup({ userId, amount, phone, currency, customer, networ
   }
 }
 
+
+async function cancelPendingTopup(userId, paymentId) {
+  const r = await db.query(
+    `UPDATE payment_transactions
+     SET status = 'failed',
+         metadata = JSON_SET(COALESCE(metadata, '{}'), '$.failReason', 'cancelled_by_rider')
+     WHERE id = ? AND user_id = ? AND status = 'pending'`,
+    [paymentId, userId]
+  );
+  return (r.affectedRows || 0) > 0;
+}
+
 /**
- * Official Snippe webhook payload:
+ * Official PayGrid webhook payload:
  * { event: "payment.completed", event_id, transaction_id, merchant_reference,
  *   data: { amount, currency, status, ... }, metadata, timestamp }
  * Callback: { type: "transaction.callback", transaction_id, merchant_reference, status, ... }
@@ -244,7 +199,7 @@ function normalizeWebhookPayload(body) {
     currency: data.currency || b.currency || null,
     rawStatus: statusRaw,
     eventId: b.event_id || null,
-    provider: 'snippe'
+    provider: 'paygrid'
   };
 }
 
@@ -281,7 +236,7 @@ async function initiateRidePayment({ userId, rideId, amount, phone, currency }) 
   const reference = `ZENJIGO-RIDE-${rideId}-${Date.now()}`;
   const insert = await db.query(
     `INSERT INTO payment_transactions (user_id, amount, currency, provider, status, external_reference, metadata)
-     VALUES (?, ?, ?, 'snippe', 'pending', ?, ?)`,
+     VALUES (?, ?, ?, 'paygrid', 'pending', ?, ?)`,
     [userId, amt, currency || config.ride.currency || 'TZS', reference,
       JSON.stringify({ phone, requestedBy: userId, channel: 'ride_payment', rideId: String(rideId) })]
   );
