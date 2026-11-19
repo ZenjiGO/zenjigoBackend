@@ -29,7 +29,12 @@ const config=require('../config/env');
     const statements=sql
       .split(/;\s*(?:\r?\n|$)/)
       .map(s=>s.trim())
-      .filter(Boolean);
+      .filter(Boolean)
+      // MySQL has no ADD COLUMN / CREATE INDEX IF NOT EXISTS (MariaDB does).
+      // Duplicate column/index errors are skipped below.
+      .map(s=>s
+        .replace(/\bADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\b/gi,'ADD COLUMN')
+        .replace(/\bCREATE\s+(UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\b/gi,'CREATE $1INDEX'));
 
     const conn=await db.pool.getConnection();
     try{
