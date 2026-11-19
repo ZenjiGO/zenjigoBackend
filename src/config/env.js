@@ -50,6 +50,13 @@ module.exports = {
     environment: process.env.NEXTSMS_ENVIRONMENT || 'production',
     defaultChannel: process.env.NEXTSMS_DEFAULT_CHANNEL || 'sms' // sms | whatsapp
   },
+  // Karibu SMS — https://docs.briq.tz/api-reference/karibu-messages/send-instant-message
+  briq: {
+    apiKey: process.env.BRIQ_API_KEY || '',
+    appId: process.env.BRIQ_APP_ID || '',
+    baseUrl: String(process.env.BRIQ_BASE_URL || 'https://karibu.briq.tz').replace(/\/$/, ''),
+    senderId: process.env.BRIQ_SENDER_ID || 'SOSHO'
+  },
   cloudinary: {
     cloudName: process.env.CLOUDINARY_CLOUD_NAME,
     apiKey: process.env.CLOUDINARY_API_KEY,
