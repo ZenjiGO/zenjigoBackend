@@ -1,7 +1,7 @@
 /**
- * OTP delivery via Email only.
- * Phone/SMS/WhatsApp OTP has been fully removed. Users still provide a phone
- * number for account identity, but every verification code is sent by email.
+ * OTP delivery.
+ * Riders receive the code by SMS (Briq, sender SOSHO).
+ * Drivers and admins still receive the code by email.
  */
 const crypto = require('crypto');
 const fs = require('fs');
@@ -9,6 +9,8 @@ const path = require('path');
 const config = require('../config/env');
 const db = require('../config/db');
 const ApiError = require('../utils/ApiError');
+const { sendSms } = require('./sms.service');
+const { normalizePhone } = require('../utils/phone');
 
 const OTP_LENGTH = 6;
 const OTP_TTL_MINUTES = 10;
@@ -72,14 +74,50 @@ a{color:#10b981;text-decoration:none}
 </td></tr></table></td></tr></table></body></html>`;
 }
 
+async function sendBySms({ target, purpose }) {
+  const phone = normalizePhone(target);
+  if (!/^\+\d{9,15}$/.test(phone)) {
+    throw ApiError.badRequest('A valid phone number is required for SMS OTP.');
+  }
+  const recent = await db.query(
+    'SELECT id, last_sent_at FROM otp_verifications WHERE target=? AND purpose=? AND status="pending" ORDER BY id DESC LIMIT 1',
+    [phone, purpose]
+  );
+  if (recent.length && recent[0].last_sent_at &&
+      Date.now() - new Date(recent[0].last_sent_at).getTime() < config.security.otpResendSeconds * 1000) {
+    throw ApiError.badRequest(`Please wait ${config.security.otpResendSeconds} seconds before requesting another OTP.`);
+  }
+  const hourly = await db.query(
+    `SELECT COUNT(*) c FROM otp_verifications WHERE target=? AND purpose=? AND created_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 HOUR)`,
+    [phone, purpose]
+  ).catch(() => [{ c: 0 }]);
+  if (Number(hourly[0]?.c || 0) >= Number(process.env.OTP_MAX_PER_HOUR || 8)) {
+    throw ApiError.tooMany('Too many verification codes requested. Please try again later.');
+  }
+  const code = (config.nodeEnv !== 'production' && process.env.OTP_DEV_FIXED_CODE) ? String(process.env.OTP_DEV_FIXED_CODE) : generateCode();
+  const codeHash = hashCode(code);
+  const appName = config.appName || 'ZenjiGO';
+  const text = `${appName} verification code: ${code}. Valid for ${OTP_TTL_MINUTES} minutes. Do not share this code.`;
+  const result = await sendSms({ to: phone, content: text });
+  const messageId = result.jobId || `SMS-${Date.now()}`;
+  await db.query('UPDATE otp_verifications SET status="cancelled" WHERE target=? AND purpose=? AND status="pending"', [phone, purpose]);
+  await db.query(
+    `INSERT INTO otp_verifications(target, channel, purpose, provider_sid, code_hash, last_sent_at, expires_at)
+     VALUES(?,?,?,?,?,UTC_TIMESTAMP(), DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? MINUTE))`,
+    [phone, 'sms', purpose, messageId, codeHash, OTP_TTL_MINUTES]
+  );
+  return { sid: messageId, channel: 'sms' };
+}
+
 async function send({ target, purpose = 'login', channel }) {
+  const ch = String(channel || 'email').toLowerCase();
+  if (ch === 'sms') return sendBySms({ target, purpose });
+  if (ch !== 'email') {
+    throw ApiError.badRequest('Unsupported channel. Use sms or email.');
+  }
   const email = String(target || '').trim().toLowerCase();
   if (!email || !email.includes('@')) {
     throw ApiError.badRequest('A valid email address is required for OTP delivery.');
-  }
-  const ch = 'email';
-  if (channel && String(channel).toLowerCase() !== 'email') {
-    throw ApiError.badRequest('Unsupported channel. Only email OTP is available.');
   }
   const recent = await db.query(
     'SELECT id, last_sent_at FROM otp_verifications WHERE target=? AND purpose=? AND status="pending" ORDER BY id DESC LIMIT 1',

@@ -22,24 +22,50 @@ function maskEmail(email) {
   return `${local.slice(0, 2)}${'*'.repeat(Math.max(2, local.length - 2))}${domain}`;
 }
 
+function cleanEmail(email) {
+  const mail = String(email || '').trim().toLowerCase();
+  return mail.includes('@') ? mail : '';
+}
+
 /**
- * OTP is always delivered by email.
- * IMPORTANT: when phone is provided for login, look up the user by (role + phone)
- * so a shared phone number never routes the code to another role (e.g. admin).
- * The code is sent to the account's registered email; if the client also sends
- * an email it must match that account.
+ * Rider login uses one identifier. A phone gets an SMS code, an email gets
+ * an email code. Signup still sends both, and that code goes by SMS.
+ * Drivers and admins still receive email on the address stored for that role.
  */
 async function sendOtp({ phone, email, purpose = 'login', role = null }) {
-  const mail = String(email || '').trim().toLowerCase();
-  if (!mail || !mail.includes('@')) {
-    throw ApiError.badRequest('A valid email address is required. OTP is delivered by email only.');
-  }
-
-  // Infer role from purpose / explicit role (set by auth routes)
   const resolvedRole =
     role ||
     (purpose === 'driver_registration' ? 'driver' : null) ||
     (purpose === 'admin_login' ? 'admin' : null);
+
+  if (resolvedRole === 'rider') {
+    const mail = cleanEmail(email);
+    const hasPhone = Boolean(String(phone || '').trim());
+    if (!hasPhone && !mail) {
+      throw ApiError.badRequest('Enter a phone number or an email address.');
+    }
+    if (hasPhone && !mail) {
+      const targetPhone = normalizePhone(phone);
+      const rows = await db.query('SELECT id FROM users WHERE role="rider" AND phone=? LIMIT 1', [targetPhone]);
+      if (!rows.length) throw ApiError.badRequest('No rider account uses this phone number.');
+      await otp.send({ target: targetPhone, purpose: purpose || 'login', channel: 'sms' });
+      return { target: targetPhone, channel: 'sms' };
+    }
+    if (mail && !hasPhone) {
+      const rows = await db.query('SELECT id FROM users WHERE role="rider" AND email=? LIMIT 1', [mail]);
+      if (!rows.length) throw ApiError.badRequest('No rider account uses this email.');
+      await otp.send({ target: mail, purpose: purpose || 'login', channel: 'email' });
+      return { target: mail, channel: 'email', maskedEmail: maskEmail(mail) };
+    }
+    const targetPhone = normalizePhone(phone);
+    await otp.send({ target: targetPhone, purpose: purpose || 'login', channel: 'sms' });
+    return { target: targetPhone, channel: 'sms' };
+  }
+
+  const mail = String(email || '').trim().toLowerCase();
+  if (!mail || !mail.includes('@')) {
+    throw ApiError.badRequest('A valid email address is required. OTP is delivered by email only.');
+  }
 
   // Login flows: resolve the account in a role-safe way, then email THAT account only
   if (purpose === 'login' || purpose === 'admin_login') {
@@ -73,13 +99,6 @@ async function sendOtp({ phone, email, purpose = 'login', role = null }) {
     }
 
     if (!user) {
-      // New rider registration: account does not exist yet.
-      // Deliver OTP to the email the client provided so verifyRider can create the user
-      // with fullName, island, region, etc. from the registration form.
-      if (resolvedRole === 'rider' && mail) {
-        await otp.send({ target: mail, purpose: 'login', channel: 'email' });
-        return { target: mail, maskedEmail: maskEmail(mail) };
-      }
       // Do not reveal whether the account exists: respond exactly like a successful send.
       return { target: mail, maskedEmail: maskEmail(mail) };
     }
@@ -121,11 +140,47 @@ async function verifyDriverOtp({ target, code, purpose = 'driver_registration' }
   return { verified: true, target: t };
 }
 
+async function riderSession(user) {
+  const wallet = (await db.query('SELECT balance FROM wallets WHERE user_id=?', [user.id]))[0]?.balance || 0;
+  return {
+    user: publicUser(user, wallet),
+    accessToken: signAccess({ sub: user.id, role: user.role }),
+    refreshToken: await issueRefreshToken(user.id, user.role)
+  };
+}
+
 async function verifyRider({ phone, code, fullName, email, island, region, district, ward }) {
-  const mail = String(email || '').trim().toLowerCase();
-  if (!mail || !mail.includes('@')) throw ApiError.badRequest('Email is required for verification.');
-  await otp.verify({ target: mail, code, purpose: 'login' });
+  const mail = cleanEmail(email);
+  const hasPhone = Boolean(String(phone || '').trim());
+  if (!hasPhone && !mail) throw ApiError.badRequest('Enter a phone number or an email address.');
+
+  if (mail && !hasPhone) {
+    await otp.verify({ target: mail, code, purpose: 'login' });
+    const rows = await db.query('SELECT * FROM users WHERE email=? AND role="rider" LIMIT 1', [mail]);
+    if (!rows.length) throw ApiError.badRequest('No rider account uses this email.');
+    await db.query(
+      'UPDATE users SET email_verified_at=COALESCE(email_verified_at,UTC_TIMESTAMP()), last_login_at=UTC_TIMESTAMP() WHERE id=?',
+      [rows[0].id]
+    );
+    const user = (await db.query('SELECT * FROM users WHERE id=?', [rows[0].id]))[0];
+    return riderSession(user);
+  }
+
+  if (hasPhone && !mail) {
+    const target = normalizePhone(phone);
+    await otp.verify({ target, code, purpose: 'login' });
+    const rows = await db.query('SELECT * FROM users WHERE phone=? AND role="rider" LIMIT 1', [target]);
+    if (!rows.length) throw ApiError.badRequest('No rider account uses this phone number.');
+    await db.query(
+      'UPDATE users SET phone_verified_at=COALESCE(phone_verified_at,UTC_TIMESTAMP()), last_login_at=UTC_TIMESTAMP() WHERE id=?',
+      [rows[0].id]
+    );
+    const user = (await db.query('SELECT * FROM users WHERE id=?', [rows[0].id]))[0];
+    return riderSession(user);
+  }
+
   const target = normalizePhone(phone);
+  await otp.verify({ target, code, purpose: 'login' });
   let rows = await db.query("SELECT * FROM users WHERE phone=? AND role='rider' LIMIT 1", [target]);
   let user;
   let isNewRider = false;
@@ -152,12 +207,11 @@ async function verifyRider({ phone, code, fullName, email, island, region, distr
     await db.query('INSERT INTO wallets(user_id) VALUES(?)', [id]);
     user = (await db.query('SELECT * FROM users WHERE id=?', [id]))[0];
   }
-  const wallet = (await db.query('SELECT balance FROM wallets WHERE user_id=?', [user.id]))[0]?.balance || 0;
   if (isNewRider) {
     try { await sendWelcomeEmail({ email: user.email, name: user.full_name, role: 'rider' }); }
     catch (err) { console.error('[WELCOME EMAIL] Failed to send rider welcome email:', err.message); }
   }
-  return { user: publicUser(user, wallet), accessToken: signAccess({ sub: user.id, role: user.role }), refreshToken: await issueRefreshToken(user.id, user.role) };
+  return riderSession(user);
 }
 
 async function loginAdmin({ email, password }) {

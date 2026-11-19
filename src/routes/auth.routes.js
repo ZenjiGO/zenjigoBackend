@@ -5,8 +5,8 @@ const c = require('../controllers/auth.controller');
 const { otpLimiter, authLimiter } = require('../middleware/rateLimit');
 
 router.post('/rider/send-otp', otpLimiter, [
-  body('phone').isString().notEmpty(),
-  body('email').isEmail().withMessage('A valid email is required for OTP delivery')
+  body('phone').optional({ checkFalsy: true }).isString().isLength({ min: 7, max: 20 }),
+  body('email').optional({ checkFalsy: true }).isEmail()
 ], validate, (req, res, next) => {
   req.body.role = 'rider';
   req.body.purpose = req.body.purpose || 'login';
@@ -14,7 +14,8 @@ router.post('/rider/send-otp', otpLimiter, [
 });
 
 router.post('/rider/verify-otp', authLimiter, [
-  body('phone').notEmpty(), body('email').isEmail(),
+  body('phone').optional({ checkFalsy: true }).isString(),
+  body('email').optional({ checkFalsy: true }).isEmail(),
   body('code').isLength({ min: 4, max: 8 }), body('fullName').optional().isLength({ max: 120 })
 ], validate, c.verifyRider);
 
