@@ -7,6 +7,7 @@ const { normalizePhone } = require('../utils/phone');
 const { ok } = require('../utils/response');
 const asyncHandler = require('../utils/asyncHandler');
 const { notifyUser } = require('../services/notification.service');
+const smsEvents = require('../services/sms.events');
 const chatService = require('../services/chat.service');
 const lifecycle = require('../services/ride.lifecycle.service');
 
@@ -462,6 +463,8 @@ exports.driverStatus = asyncHandler(async (req, res) => {
       'driver_status',
       { type: 'driver_status', status: appStatus, reason: rejectionReason || '' }
     );
+    const smsTpl = appStatus === 'active' ? 'driver_approved' : status === 'suspended' ? 'driver_suspended' : status === 'rejected' ? 'driver_rejected' : null;
+    if (smsTpl) smsEvents.later(smsEvents.sendToUser(id, smsTpl, { reason: rejectionReason || '' }, { createdBy: req.user.sub }));
   } catch (_) {}
   ok(res, { applicationStatus: appStatus, rejectionReason }, 'Driver status updated');
 });
@@ -676,6 +679,7 @@ exports.payoutStatus = asyncHandler(async (req, res) => {
   try {
     const titles = { approved: 'Payout approved', paid: 'Payout sent', rejected: 'Payout rejected' };
     await notifyUser(rows[0].driver_id, titles[status], `Your payout request of TZS ${Number(rows[0].amount).toLocaleString()} was ${status}.${note ? ' ' + note : ''}`, 'payout_status', { type: 'payout_status', payoutId: String(req.params.id), status });
+    smsEvents.later(smsEvents.sendToUser(rows[0].driver_id, 'payout_status', { amount: rows[0].amount, status, note }, { createdBy: req.user.sub }));
   } catch (_) {}
   ok(res, null, 'Payout status updated');
 });
@@ -1374,7 +1378,7 @@ exports.reviewChangeRequest = asyncHandler(async (req, res) => {
         const val = String(cr.new_value || '').trim();
         if (!val) throw ApiError.badRequest('The request has no new value to apply.');
         if (cr.field_name === 'full_name') await conn.query('UPDATE users SET full_name=? WHERE id=?', [val, cr.driver_id]);
-        else if (cr.field_name === 'phone') await conn.query('UPDATE users SET phone=? WHERE id=?', [normalizePhone(val), cr.driver_id]);
+        else if (cr.field_name === 'phone') { await conn.query('UPDATE users SET phone=?, phone_verified_at=UTC_TIMESTAMP() WHERE id=?', [normalizePhone(val), cr.driver_id]); smsEvents.later(smsEvents.sendToPhone(normalizePhone(val), 'phone_changed', {}, { userId: cr.driver_id })); }
         else if (cr.field_name === 'email') await conn.query('UPDATE users SET email=? WHERE id=?', [val.toLowerCase(), cr.driver_id]);
         else if (cr.field_name === 'home_address') await conn.query('UPDATE driver_profiles SET home_address=? WHERE user_id=?', [val, cr.driver_id]);
         else if (cr.field_name === 'national_id') await conn.query('UPDATE driver_profiles SET national_id=? WHERE user_id=?', [val, cr.driver_id]);

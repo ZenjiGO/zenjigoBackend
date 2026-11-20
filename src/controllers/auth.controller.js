@@ -11,6 +11,14 @@ exports.sendEmailOtp = asyncHandler(async (req, res) =>
   ok(res, await auth.sendEmailOtp(req.body), 'Email OTP sent')
 );
 
+exports.sendDriverPhoneOtp = asyncHandler(async (req, res) =>
+  ok(res, await auth.sendDriverPhoneOtp(req.body), 'Verification code sent by SMS')
+);
+
+exports.adminSendSmsOtp = asyncHandler(async (req, res) =>
+  ok(res, await auth.sendAdminSmsOtp(req.body), 'Verification code sent by SMS')
+);
+
 exports.verifyDriverOtp = asyncHandler(async (req, res) =>
   ok(res, await auth.verifyDriverOtp(req.body), 'OTP verified')
 );

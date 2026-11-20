@@ -27,7 +27,8 @@
     { group: 'Care & safety', items: [
       { k: 'support', l: 'Support inbox', i: 'chat', q: (q) => q.supportUnread, tone: '' },
       { k: 'reports', l: 'Safety reports', i: 'flag', q: (q) => q.reports, tone: 'danger' },
-      { k: 'notifications', l: 'Notifications', i: 'bell' } ] },
+      { k: 'notifications', l: 'Notifications', i: 'bell' },
+      { k: 'sms', l: 'SMS Center', i: 'phone' } ] },
     { group: 'Platform', items: [
       { k: 'pricing', l: 'Pricing & policy', i: 'sliders' },
       { k: 'admins', l: 'Admins & access', i: 'shield' },
@@ -53,7 +54,7 @@
   }
   function loginStep(note) {
     const email = (Z._loginEmail || '');
-    setHtml($('#authCard'), html`<span class="eyebrow">${ico('lock')} Administrator sign-in</span><h2>Welcome back</h2><p class="sub">Sign in with your admin email and password. We’ll then email you a verification code.</p>
+    setHtml($('#authCard'), html`<span class="eyebrow">${ico('lock')} Administrator sign-in</span><h2>Welcome back</h2><p class="sub">Sign in with your admin email and password. We’ll then send you a verification code.</p>
       ${note ? html`<div class="banner warn" style="margin-bottom:16px">${ico('info')}<div>${note}</div></div>` : ''}
       <form id="loginForm" novalidate><div class="form-error" data-form-error role="alert">${ico('alert')}<span></span></div>
         <div class="field" data-field="email"><label for="lgEmail">Email address</label><input id="lgEmail" name="email" type="email" class="input" autocomplete="username" value="${email}" placeholder="you@zenjigo.com" required><div class="err"></div></div>
@@ -71,18 +72,20 @@
       if (pw.length < 8) { fieldErr('password', 'Password must be at least 8 characters.'); bad = true; }
       if (bad) return;
       await Z.busy($('#lgBtn'), async () => {
-        try { const r = await Z.api.login(em, pw); Z._loginEmail = em; Z._pw = pw; Z._remember = $('#lgRemember').checked; otpStep(r && r.maskedEmail ? r.maskedEmail : em); }
+        try { const r = await Z.api.login(em, pw); Z._loginEmail = em; Z._pw = pw; Z._remember = $('#lgRemember').checked; otpStep(r && r.maskedEmail ? r.maskedEmail : em, r || {}); }
         catch (err) { $('span', bar).textContent = err.message; bar.classList.add('show'); }
       });
     });
     function fieldErr(n, m) { const w = $(`[data-field="${n}"]`, form); w.classList.add('invalid'); $('.err', w).textContent = m; }
   }
-  function otpStep(masked) {
+  function otpStep(masked, info = {}) {
+    let channel = 'email'; let target = masked; const smsOk = !!info.smsAvailable;
     const LEN = 6; let expiresAt = Date.now() + 10 * 60 * 1000; let resendAt = Date.now() + 30 * 1000; let timer;
-    setHtml($('#authCard'), html`<button class="back" id="otpBack">${ico('chevL')} Back to sign in</button><span class="eyebrow">${ico('mail')} Two-step verification</span><h2>Check your email</h2><p class="sub">Enter the 6-digit code we sent to <b>${masked}</b>.</p>
+    setHtml($('#authCard'), html`<button class="back" id="otpBack">${ico('chevL')} Back to sign in</button><span class="eyebrow">${ico('mail')} Two-step verification</span><h2 id="otpTitle">Check your email</h2><p class="sub" id="otpSub">Enter the 6-digit code we sent to <b>${masked}</b>.</p>
       <form id="otpForm" novalidate><div class="form-error" data-form-error role="alert">${ico('alert')}<span></span></div>
         <div class="otp" id="otpRow" role="group" aria-label="Verification code">${Array.from({ length: LEN }, (_, i) => html`<input inputmode="numeric" autocomplete="${i === 0 ? 'one-time-code' : 'off'}" maxlength="1" aria-label="Digit ${i + 1}">`)}</div>
         <div class="row between" style="margin:14px 0 22px;font-size:13px"><span class="muted" id="otpTimer"></span><button type="button" class="link" id="otpResend" disabled>Resend code</button></div>
+        ${smsOk ? html`<div class="row" style="margin:-8px 0 18px;font-size:13px"><button type="button" class="link" id="otpSwitch">${ico('phone')} Send the code by SMS to ${info.maskedPhone} instead</button></div>` : ''}
         <button class="btn btn-primary btn-lg btn-block" id="otpBtn" type="submit"><span class="spin"></span>Verify and sign in</button></form>`);
     const inputs = $$('#otpRow input'); const form = $('#otpForm'); const bar = $('[data-form-error]', form);
     inputs[0].focus();
@@ -99,10 +102,20 @@
       const r = $('#otpResend'); r.disabled = rs > 0; r.textContent = rs > 0 ? `Resend in ${rs}s` : 'Resend code';
     };
     timer = setInterval(tick, 1000); tick();
+    const sw = $('#otpSwitch');
+    if (sw) sw.addEventListener('click', async () => {
+      sw.disabled = true;
+      try {
+        if (channel === 'email') { await Z.api.sendSmsOtp(Z._loginEmail, Z._pw || ''); channel = 'sms'; setHtml($('#otpTitle'), 'Check your phone'); setHtml($('#otpSub'), html`Enter the 6-digit code we sent by SMS to <b>${info.maskedPhone}</b>.`); setHtml(sw, html`${ico('mail')} Send the code to ${masked} by email instead`); }
+        else { await Z.api.login(Z._loginEmail, Z._pw || ''); channel = 'email'; setHtml($('#otpTitle'), 'Check your email'); setHtml($('#otpSub'), html`Enter the 6-digit code we sent to <b>${masked}</b>.`); setHtml(sw, html`${ico('phone')} Send the code by SMS to ${info.maskedPhone} instead`); }
+        expiresAt = Date.now() + 10 * 60 * 1000; resendAt = Date.now() + 30 * 1000; bar.classList.remove('show'); inputs.forEach((i) => (i.value = '')); inputs[0].focus(); tick();
+      } catch (err) { $('span', bar).textContent = err.message; bar.classList.add('show'); }
+      sw.disabled = false;
+    });
     $('#otpBack').addEventListener('click', () => { clearInterval(timer); Z._pw = ''; loginStep(); });
     $('#otpResend').addEventListener('click', async () => {
       const b = $('#otpResend'); b.disabled = true;
-      try { await Z.api.login(Z._loginEmail, Z._pw || ''); expiresAt = Date.now() + 10 * 60 * 1000; resendAt = Date.now() + 30 * 1000; bar.classList.remove('show'); Z.toast('A new code is on its way.'); inputs.forEach((i) => (i.value = '')); inputs[0].focus(); }
+      try { if (channel === 'sms') await Z.api.sendSmsOtp(Z._loginEmail, Z._pw || ''); else await Z.api.login(Z._loginEmail, Z._pw || ''); expiresAt = Date.now() + 10 * 60 * 1000; resendAt = Date.now() + 30 * 1000; bar.classList.remove('show'); Z.toast('A new code is on its way.'); inputs.forEach((i) => (i.value = '')); inputs[0].focus(); }
       catch (err) { $('span', bar).textContent = err.message; bar.classList.add('show'); resendAt = Date.now() + 15 * 1000; }
       tick();
     });

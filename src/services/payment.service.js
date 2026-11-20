@@ -13,6 +13,17 @@ function verifySignature(rawBody, signature) {
 }
 
 async function completeWalletTopup(paymentId, externalReference, providerName = 'paygrid', confirmedAmount = null) {
+  const result = await creditWalletTopup(paymentId, externalReference, providerName, confirmedAmount);
+  if (result && result._credited) {
+    const smsEvents = require('./sms.events');
+    smsEvents.later(smsEvents.sendToUser(result.user_id, 'wallet_topup', { amount: result.amount, balance: result._balanceAfter }));
+    const { _credited, _balanceAfter, ...clean } = result;
+    return clean;
+  }
+  return result;
+}
+
+async function creditWalletTopup(paymentId, externalReference, providerName, confirmedAmount) {
   return db.transaction(async (conn) => {
     const [rows] = await conn.query(
       'SELECT * FROM payment_transactions WHERE id = ? FOR UPDATE',
@@ -57,7 +68,7 @@ async function completeWalletTopup(paymentId, externalReference, providerName = 
        VALUES (?, 'topup', ?, ?, ?, 'payment', ?, ?, 'Wallet top-up', 'success')`,
       [p.user_id, p.amount, before, after, p.id, providerName || 'paygrid']
     );
-    return { ...p, status: 'success' };
+    return { ...p, status: 'success', _credited: true, _balanceAfter: after };
   });
 }
 

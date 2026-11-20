@@ -5,6 +5,7 @@ const { sendPush } = require('../config/firebase');
 const { notifyUser } = require('./notification.service');
 const finance = require('./driver_finance.service');
 const realtime = require('../utils/realtime');
+const smsEvents = require('./sms.events');
 
 /* ------------------------------------------------------------------ *
  * Lifecycle rules (all overridable from .env, evaluated at call time)
@@ -415,6 +416,7 @@ async function accept(driverId,rideId){
     if (accepted) { realtime.emitToUser(accepted.riderId,'ride:updated',{rideId:accepted.id,status:'accepted'}); }
     if (accepted && accepted.riderId) {
       await pushUser(accepted.riderId,'Driver on the way','Your ZenjiGO driver accepted the ride and is heading to you.',{type:'ride_accepted',rideId:String(accepted.id),status:'accepted'});
+      smsRideDetails(accepted.id,'ride_accepted');
     }
   } catch (e) { console.warn('[accept push]', e.message); }
   try {
@@ -477,6 +479,7 @@ async function setStatus(driverId,rideId,status,opts={}){
  });
  if(result){
    await pushUser(result.rider_id, STATUS_TITLES[status]||`Ride ${status}`, STATUS_BODIES[status]||`Your ride is now ${status}.`, { type:'ride_status', rideId:String(rideId), status:String(status) });
+   if(status==='arrived') smsRideDetails(rideId,'ride_arrived');
  }
  return getById(rideId,driverId);
 }
@@ -537,10 +540,12 @@ async function confirmPaymentAndComplete(rideId,meta={}){
  if(!done.already){
    const {r,earning}=done;
    await pushUser(r.rider_id,'Payment received','Thank you! Your ride is complete. Rate your trip.',{type:'ride_status',rideId:String(rideId),status:'completed'});
+   smsRideDetails(rideId,'ride_completed');
    const share=earning && earning.driverShare!=null?Math.round(earning.driverShare):null;
    await pushUser(r.driver_id,'Trip completed',share!=null?`Your share: TZS ${share.toLocaleString()}.`:'Fare recorded. Check Earnings for details.',{type:'ride_completed',rideId:String(rideId)});
    try{
      const fs=await finance.getStatus(r.driver_id);
+     if(fs.blocked) smsEvents.later(smsEvents.sendToUser(r.driver_id,'settlement_due',{amount:fs.commissionOwed}));
      if(fs.blocked && fs.autopayEnabled) await finance.tryAutopay(r.driver_id);
    }catch(e){ console.warn('[ride complete autopay]',e.message); }
  }
@@ -803,6 +808,26 @@ async function chargeWallet(userId,amount,type,refId,description){
   const before=Number(w[0].balance),after=before-amount; await conn.query('UPDATE wallets SET balance=? WHERE user_id=?',[after,userId]); await conn.query('INSERT INTO wallet_transactions(user_id,type,amount,balance_before,balance_after,reference_type,reference_id,payment_method,description) VALUES(?,?,?,?,?,?,?,?,?)',[userId,type,-amount,before,after,type,refId,'wallet',description]); return after;
  });
 }
+/** Looks up the ride + driver details and sends the matching SMS to the rider. Never throws. */
+function smsRideDetails(rideId, template) {
+  smsEvents.later((async () => {
+    const rows = await db.query(
+      `SELECT r.rider_id, r.ride_code, r.trip_pin, r.estimated_fare, r.discount, r.cancellation_fee, r.tip,
+              du.full_name AS driver_name, v.plate_number
+         FROM rides r
+         LEFT JOIN users du ON du.id = r.driver_id
+         LEFT JOIN vehicles v ON v.driver_id = r.driver_id AND v.status = 'active'
+        WHERE r.id = ? LIMIT 1`, [rideId]);
+    if (!rows.length) return;
+    const x = rows[0];
+    const total = Math.max(0, Number(x.estimated_fare || 0) - Number(x.discount || 0) + Number(x.cancellation_fee || 0) + Number(x.tip || 0));
+    await smsEvents.sendToUser(x.rider_id, template, {
+      driver: String(x.driver_name || '').split(' ')[0], plate: x.plate_number || '', pin: x.trip_pin || '',
+      code: x.ride_code || '', total
+    });
+  })());
+}
+
 async function pushUser(userId, title, body, data = {}) {
   const type = (data && data.type) || 'system';
   // Instant in-app update (sockets) in addition to the push, so open apps refresh without waiting for a poll.
@@ -904,6 +929,7 @@ async function expireStaleSearching() {
     realtime.emitToUser(r.rider_id, 'ride:updated', { rideId: r.id, status: 'cancelled', reason: 'no_drivers' });
     try {
       await pushUser(r.rider_id, 'No drivers available', 'We could not find a driver nearby right now. Please try again in a moment.', { type: 'ride_status', rideId: String(r.id), status: 'cancelled' });
+      smsEvents.later(smsEvents.sendToUser(r.rider_id,'ride_no_driver',{}));
     } catch (_) {}
   }
   return n;
@@ -930,6 +956,7 @@ async function cancelSystem(rideId, { reason, actorId = null, event = 'auto_canc
   if (prev && notify) {
     try {
       await pushUser(prev.rider_id, 'Ride cancelled', reason ? String(reason) : 'Your ride was cancelled.', { type: 'ride_status', rideId: String(rideId), status: 'cancelled' });
+      smsEvents.later(smsEvents.sendToUser(prev.rider_id,'ride_cancelled',{code:prev.ride_code||''}));
       if (prev.driver_id) await pushUser(prev.driver_id, 'Ride cancelled', reason ? String(reason) : 'This ride was cancelled.', { type: 'ride_cancelled', rideId: String(rideId), status: 'cancelled' });
     } catch (e) { console.warn('[cancelSystem notify]', e.message); }
   }

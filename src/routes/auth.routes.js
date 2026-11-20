@@ -20,8 +20,12 @@ router.post('/rider/verify-otp', authLimiter, [
 ], validate, c.verifyRider);
 
 router.post('/driver/send-otp', otpLimiter, [
-  body('phone').optional().isString(),
-  body('email').isEmail().withMessage('A valid email is required for OTP delivery'),
+  body('phone').optional({ checkFalsy: true }).isString().isLength({ min: 7, max: 20 }),
+  body('email').optional({ checkFalsy: true }).isEmail().withMessage('Enter a valid email address'),
+  body('email').custom((value, { req }) => {
+    if (!value && !req.body.phone) throw new Error('Enter your phone number or email address');
+    return true;
+  }),
   body('purpose').optional().isIn(['login', 'driver_registration'])
 ], validate, (req, res, next) => {
   req.body.role = 'driver';
@@ -33,17 +37,23 @@ router.post('/driver/send-email-otp', otpLimiter, [
   body('email').isEmail(), body('purpose').optional().isIn(['driver_registration'])
 ], validate, (req, res, next) => { req.body.purpose = req.body.purpose || 'driver_registration'; c.sendEmailOtp(req, res, next); });
 
+router.post('/driver/send-phone-otp', otpLimiter, [
+  body('phone').isString().isLength({ min: 7, max: 20 }).withMessage('Enter a valid phone number')
+], validate, c.sendDriverPhoneOtp);
+
 router.post('/driver/verify-otp', authLimiter, [
-  body('target').isEmail(), body('code').isLength({ min: 4, max: 8 }),
+  body('target').isString().isLength({ min: 5, max: 190 }), body('code').isLength({ min: 4, max: 8 }),
   body('purpose').optional().isIn(['login', 'driver_registration'])
 ], validate, (req, res, next) => { req.body.purpose = req.body.purpose || 'driver_registration'; c.verifyDriverOtp(req, res, next); });
 
 router.post('/driver/login', authLimiter, [
-  body('email').isEmail().withMessage('A valid email is required for driver sign-in'),
+  body('email').optional({ checkFalsy: true }).isEmail().withMessage('Enter a valid email address'),
+  body('phone').optional({ checkFalsy: true }).isString().isLength({ min: 7, max: 20 }),
   body('code').isLength({ min: 4, max: 8 }).withMessage('A valid OTP code is required')
 ], validate, c.loginDriver);
 
 router.post('/admin/login', authLimiter, [body('email').isEmail(), body('password').isString().isLength({ min: 8 })], validate, c.adminLogin);
+router.post('/admin/send-sms-otp', otpLimiter, [body('email').isEmail(), body('password').isString().isLength({ min: 8 })], validate, c.adminSendSmsOtp);
 router.post('/admin/verify-otp', authLimiter, [body('email').isEmail(), body('code').isLength({ min: 4, max: 8 })], validate, c.adminVerifyOtp);
 router.post('/refresh', [body('refreshToken').notEmpty()], validate, c.refresh);
 router.post('/logout', c.logout);

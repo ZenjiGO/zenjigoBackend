@@ -3,6 +3,7 @@ const ApiError = require('../utils/ApiError');
 const { ok } = require('../utils/response');
 const asyncHandler = require('../utils/asyncHandler');
 const finance = require('../services/driver_finance.service');
+const smsEvents = require('../services/sms.events');
 
 const code = (p) =>
   `${p}${Date.now().toString(36).toUpperCase().slice(-8)}${Math.floor(Math.random() * 99)
@@ -37,6 +38,7 @@ exports.createParcel = asyncHandler(async (req, res) => {
       b.estimatedFare || null,
     ]
   );
+  smsEvents.later(smsEvents.sendToUser(req.user.sub, 'parcel_tour', { what: 'your parcel request', code: parcelCode }));
   ok(res, { id: r.insertId, code: parcelCode }, 'Parcel created', 201);
 });
 
@@ -89,12 +91,14 @@ exports.createTour = asyncHandler(async (req, res) => {
   }
 
   const total = Number(p[0].base_price) * tourists;
+  const bookingCode = code('TZ');
   const r = await db.query(
     `INSERT INTO tour_bookings(booking_code,package_id,rider_id,pickup_location,pickup_at,tourists,total_amount)
      VALUES(?,?,?,?,?,?,?)`,
-    [code('TZ'), packageId, req.user.sub, pickupLocation, pickupAt, tourists, total]
+    [bookingCode, packageId, req.user.sub, pickupLocation, pickupAt, tourists, total]
   );
-  ok(res, { id: r.insertId, totalAmount: total, bookingCode: code('TZ') }, 'Tour booked', 201);
+  smsEvents.later(smsEvents.sendToUser(req.user.sub, 'parcel_tour', { what: `your ${p[0].name || 'tour'} booking`, code: bookingCode }));
+  ok(res, { id: r.insertId, totalAmount: total, bookingCode }, 'Tour booked', 201);
 });
 
 /** Public-ish app metadata for version checks */

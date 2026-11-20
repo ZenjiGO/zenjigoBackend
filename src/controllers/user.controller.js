@@ -27,7 +27,6 @@ exports.update = asyncHandler(async (req, res) => {
   const vals = [];
   const map = {
     fullName: 'full_name',
-    email: 'email',
     photoUrl: 'photo_url',
     island: 'island',
     region: 'region',
@@ -39,6 +38,10 @@ exports.update = asyncHandler(async (req, res) => {
       sets.push(`${col}=?`);
       vals.push(req.body[k]);
     }
+  }
+  if (req.body.smsOptIn !== undefined) {
+    sets.push('sms_opt_in=?');
+    vals.push(req.body.smsOptIn ? 1 : 0);
   }
   // Push / notification preference (column added by migration if missing)
   if (req.body.notificationsEnabled !== undefined || req.body.pushEnabled !== undefined) {
@@ -232,6 +235,19 @@ exports.listMyReports = asyncHandler(async (req, res) => {
 
 const authService = require('../services/auth.service');
 const crypto = require('crypto');
+
+// Phone numbers change only after the new number proves ownership by SMS.
+exports.sendPhoneChangeOtp = asyncHandler(async (req, res) => {
+  const r = await authService.sendPhoneChangeOtp({ userId: req.user.sub, role: 'rider', phone: req.body.phone });
+  ok(res, r, 'Verification code sent by SMS');
+});
+
+exports.verifyPhoneChangeOtp = asyncHandler(async (req, res) => {
+  const code = (req.body.code || '').toString().trim();
+  if (!code) throw ApiError.badRequest('Verification code is required');
+  await authService.verifyPhoneChangeOtp({ userId: req.user.sub, role: 'rider', phone: req.body.phone, code });
+  return exports.me(req, res);
+});
 
 exports.sendEmailChangeOtp = asyncHandler(async (req, res) => {
   const email = (req.body.email || '').toString().trim().toLowerCase();

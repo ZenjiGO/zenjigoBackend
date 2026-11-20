@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const c = require('../controllers/user.controller');
+const { otpLimiter, authLimiter } = require('../middleware/rateLimit');
 
 router.get('/me', c.me);
 router.patch('/me', c.update);
@@ -23,8 +24,10 @@ router.delete('/notifications/token', c.removeDeviceToken);
 router.post('/reports', c.createReport);
 router.get('/reports', c.listMyReports);
 
-router.post('/email-change/send-otp', c.sendEmailChangeOtp);
-router.post('/email-change/verify-otp', c.verifyEmailChangeOtp);
+router.post('/phone-change/send-otp', otpLimiter, c.sendPhoneChangeOtp);
+router.post('/phone-change/verify-otp', authLimiter, c.verifyPhoneChangeOtp);
+router.post('/email-change/send-otp', otpLimiter, c.sendEmailChangeOtp);
+router.post('/email-change/verify-otp', authLimiter, c.verifyEmailChangeOtp);
 
 module.exports = router;
 

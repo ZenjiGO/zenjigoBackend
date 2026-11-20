@@ -58,3 +58,12 @@ exports.updateProfilePhoto=asyncHandler(async(req,res)=>ok(res,await s.updatePro
 exports.removeProfilePhoto=asyncHandler(async(req,res)=>ok(res,await s.removeProfilePhoto(req.user.sub),'Profile photo removed'));
 
 exports.bootstrapSession=asyncHandler(async(req,res)=>ok(res,await s.bootstrapSession(req.body),'Session ready'));
+
+// Phone change: the new number must be verified by SMS before the admin-reviewed request is created.
+exports.sendPhoneChangeOtp=asyncHandler(async(req,res)=>ok(res,await require('../services/auth.service').sendPhoneChangeOtp({userId:req.user.sub,role:'driver',phone:req.body.phone}),'Verification code sent by SMS'));
+exports.verifyPhoneChangeOtp=asyncHandler(async(req,res)=>{
+  const r=await require('../services/auth.service').verifyPhoneChangeOtp({userId:req.user.sub,role:'driver',phone:req.body.phone,code:req.body.code});
+  // The proof stays valid for 24h, so the change request below needs no second code.
+  const reqRow=await s.requestProfileChange(req.user.sub,{field:'phone',newValue:r.phone,reason:'Phone number verified by SMS'});
+  ok(res,{phone:r.phone,verified:true,request:reqRow},'Phone verified. Your change request was sent for approval.',201);
+});

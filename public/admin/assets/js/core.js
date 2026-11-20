@@ -177,6 +177,7 @@
     del: (p, b) => request(p, { method: 'DELETE', body: b ?? {} }).finally(() => cache.clear()),
     clearCache: () => cache.clear(),
     async login(email, password) { return request('/auth/admin/login', { method: 'POST', body: { email, password }, auth: false }); },
+    async sendSmsOtp(email, password) { return request('/auth/admin/send-sms-otp', { method: 'POST', body: { email, password }, auth: false }); },
     async verifyOtp(email, code, remember) {
       const d = await request('/auth/admin/verify-otp', { method: 'POST', body: { email, code }, auth: false });
       store.set(d, !!remember); cache.clear(); return d;

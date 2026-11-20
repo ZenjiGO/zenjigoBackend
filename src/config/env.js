@@ -3,6 +3,7 @@ require('dotenv').config();
 const requiredInProduction = [
   'JWT_ACCESS_SECRET','JWT_REFRESH_SECRET',
   'SMTP_HOST','SMTP_USER','SMTP_PASSWORD','SMTP_FROM',
+  'BRIQ_API_KEY',
   'CLOUDINARY_CLOUD_NAME','CLOUDINARY_API_KEY','CLOUDINARY_API_SECRET'
 ];
 
@@ -38,24 +39,21 @@ module.exports = {
     refreshExpires: process.env.JWT_REFRESH_EXPIRES || '30d'
   },
   corsOrigins: csv(process.env.CORS_ORIGINS, 'http://localhost:5000,http://127.0.0.1:5000,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,http://localhost:5501,http://127.0.0.1:5501'),
-  // NextSMS (replaces Twilio) — Internet SMS + WhatsApp SMS
-  nextsms: {
-    username: process.env.NEXTSMS_USERNAME,
-    password: process.env.NEXTSMS_PASSWORD,
-    // Optional pre-computed Basic token: base64(username:password)
-    apiKey: process.env.NEXTSMS_API_KEY || '',
-    senderId: process.env.NEXTSMS_SENDER_ID || 'NEXTSMS',
-    baseUrl: process.env.NEXTSMS_BASE_URL || 'https://messaging-service.co.tz',
-    // production | testing  (testing uses /api/.../v2/test/... endpoints)
-    environment: process.env.NEXTSMS_ENVIRONMENT || 'production',
-    defaultChannel: process.env.NEXTSMS_DEFAULT_CHANNEL || 'sms' // sms | whatsapp
-  },
   // Karibu SMS — https://docs.briq.tz/api-reference/karibu-messages/send-instant-message
   briq: {
     apiKey: process.env.BRIQ_API_KEY || '',
     appId: process.env.BRIQ_APP_ID || '',
     baseUrl: String(process.env.BRIQ_BASE_URL || 'https://karibu.briq.tz').replace(/\/$/, ''),
     senderId: process.env.BRIQ_SENDER_ID || 'SOSHO'
+  },
+  sms: {
+    // Transactional ride/account SMS. Per-event switches live in app_settings.sms_events (Admin > SMS Center).
+    notificationsEnabled: String(process.env.SMS_NOTIFICATIONS_ENABLED || 'true').toLowerCase() !== 'false',
+    // Admin sign-in: also offer the one-time code by SMS to the admin's verified phone.
+    adminOtpBySms: String(process.env.ADMIN_OTP_SMS || 'true').toLowerCase() !== 'false',
+    // Driver registration needs a verified phone number as well as a verified email.
+    requireDriverPhoneVerification: String(process.env.REQUIRE_DRIVER_PHONE_VERIFICATION || 'true').toLowerCase() !== 'false',
+    broadcastMax: Number(process.env.SMS_BROADCAST_MAX || 2000)
   },
   cloudinary: {
     cloudName: process.env.CLOUDINARY_CLOUD_NAME,

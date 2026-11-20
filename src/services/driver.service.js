@@ -1,6 +1,6 @@
 const { signAccess, issueRefreshToken } = require('../utils/jwt');
 const { notifyUser } = require('./notification.service');
-const db=require('../config/db'); const ApiError=require('../utils/ApiError'); const {normalizePhone}=require('../utils/phone'); const {upload}=require('./upload.service'); const {hashPassword}=require('../utils/hash'); const {publicUser}=require('./auth.service'); const config=require('../config/env'); const otp=require('./otp.service'); const {sendWelcomeEmail}=require('./welcome-email.service');
+const db=require('../config/db'); const ApiError=require('../utils/ApiError'); const {normalizePhone}=require('../utils/phone'); const {upload}=require('./upload.service'); const {hashPassword}=require('../utils/hash'); const {publicUser}=require('./auth.service'); const config=require('../config/env'); const otp=require('./otp.service'); const {sendWelcomeEmail}=require('./welcome-email.service'); const smsEvents=require('./sms.events');
 function code(id){return `ZG-DRV-${String(id).padStart(6,'0')}`;}
 async function register(data,files){
  // Accept both historical multipart field names so older clients remain compatible.
@@ -28,6 +28,10 @@ async function register(data,files){
    code: data.emailOtpCode,
    purpose: 'driver_registration'
  });
+ // The phone number must be proven by SMS as well (can be switched off with REQUIRE_DRIVER_PHONE_VERIFICATION=false).
+ if(!config.sms || config.sms.requireDriverPhoneVerification!==false){
+   await otp.verifyPhoneForSubmit({ target: phone, code: data.phoneOtpCode, purpose: 'driver_registration_phone' });
+ }
  if(!String(data.fullName || '').trim() ||
     !String(data.phone || '').trim() ||
     !emailTarget ||
@@ -95,6 +99,7 @@ async function register(data,files){
    return id;
  });
 
+ smsEvents.later(smsEvents.sendToPhone(phone,'welcome_driver',{}));
  try { await sendWelcomeEmail({ email: emailTarget, name: data.fullName, role: 'driver' }); }
  catch (err) { console.error('[WELCOME EMAIL] Failed to send driver welcome email:', err.message); }
 
@@ -349,6 +354,10 @@ async function requestProfileChange(driverId, body){
   if(!field || !newValue) throw ApiError.badRequest('field and newValue are required');
   const allowed = ['full_name','phone','email','home_address','national_id'];
   if(!allowed.includes(field)) throw ApiError.badRequest('Unsupported field');
+  if(field==='phone'){
+    // A new number is only accepted once it has been verified by SMS (purpose phone_change).
+    await otp.verifyContactProof({ target:newValue, code:body.verificationCode, purpose:'phone_change', label:'phone number' });
+  }
   try {
     const r = await db.query(
       `INSERT INTO driver_change_requests(driver_id, request_type, field_name, new_value, reason, status)

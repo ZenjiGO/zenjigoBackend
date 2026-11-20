@@ -23,7 +23,8 @@ router.post(
     body('nationalId').notEmpty(),
     body('vehicleType').isIn(['boda', 'bajaji', 'taxi']),
     body('plateNumber').notEmpty(),
-    body('emailOtpCode').notEmpty().withMessage('Email verification code is required')
+    body('emailOtpCode').notEmpty().withMessage('Email verification code is required'),
+    body('phoneOtpCode').optional({ checkFalsy: true }).isString()
   ],
   validate,
   c.register

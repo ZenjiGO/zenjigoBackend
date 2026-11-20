@@ -56,6 +56,15 @@ router.post('/rides/:id/dismiss-flag', c.dismissRideFlag);
 router.get('/live-map', c.liveMap);
 router.get('/maps-config', c.mapsConfig);
 
+// SMS Center (Briq Karibu)
+const sms = require('../controllers/sms.admin.controller');
+router.get('/sms/overview', sms.overview);
+router.get('/sms/logs', sms.logs);
+router.post('/sms/test', sms.test);
+router.post('/sms/preview', sms.preview);
+router.post('/sms/send', sms.send);
+router.patch('/sms/settings', sms.updateSettings);
+
 // Finance
 router.get('/payments', c.payments);
 router.post('/payments/:id/complete', c.completePayment);

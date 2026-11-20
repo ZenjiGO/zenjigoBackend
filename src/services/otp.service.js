@@ -1,7 +1,7 @@
 /**
- * OTP delivery.
- * Riders receive the code by SMS (Briq, sender SOSHO).
- * Drivers and admins still receive the code by email.
+ * OTP delivery and verification (single source of truth for every code in the platform).
+ * Channels: SMS (Briq Karibu) and email (SMTP). Targets are normalised so the same
+ * number/address always maps to the same record (+255712345678 / lower-case email).
  */
 const crypto = require('crypto');
 const fs = require('fs');
@@ -10,7 +10,7 @@ const config = require('../config/env');
 const db = require('../config/db');
 const ApiError = require('../utils/ApiError');
 const { sendSms } = require('./sms.service');
-const { normalizePhone } = require('../utils/phone');
+const { normalizePhone, isValidPhone, logPhone } = require('../utils/phone');
 
 const OTP_LENGTH = 6;
 const OTP_TTL_MINUTES = 10;
@@ -36,6 +36,22 @@ function safeEqualHex(a, b) {
 function generateCode() {
   const n = crypto.randomInt(0, 10 ** OTP_LENGTH);
   return String(n).padStart(OTP_LENGTH, '0');
+}
+
+/** email -> lower-case, anything else -> E.164 phone */
+function normalizeTarget(target) {
+  const value = String(target || '').trim();
+  return value.includes('@') ? value.toLowerCase() : normalizePhone(value);
+}
+
+/** Extra line that lets browsers (WebOTP) and Android (SMS Retriever) auto-fill the code. */
+function autofillSuffix(code) {
+  const domain = String(process.env.OTP_WEBOTP_DOMAIN || '').trim();
+  const hash = String(process.env.OTP_ANDROID_APP_HASH || '').trim();
+  let out = '';
+  if (domain) out += `\n\n@${domain} #${code}`;
+  else if (hash) out += `\n\n${hash}`;
+  return out;
 }
 
 function buildEmailHtml({ appName, code, purpose }) {
@@ -74,14 +90,10 @@ a{color:#10b981;text-decoration:none}
 </td></tr></table></td></tr></table></body></html>`;
 }
 
-async function sendBySms({ target, purpose }) {
-  const phone = normalizePhone(target);
-  if (!/^\+\d{9,15}$/.test(phone)) {
-    throw ApiError.badRequest('A valid phone number is required for SMS OTP.');
-  }
+async function enforceLimits(target, purpose) {
   const recent = await db.query(
     'SELECT id, last_sent_at FROM otp_verifications WHERE target=? AND purpose=? AND status="pending" ORDER BY id DESC LIMIT 1',
-    [phone, purpose]
+    [target, purpose]
   );
   if (recent.length && recent[0].last_sent_at &&
       Date.now() - new Date(recent[0].last_sent_at).getTime() < config.security.otpResendSeconds * 1000) {
@@ -89,29 +101,52 @@ async function sendBySms({ target, purpose }) {
   }
   const hourly = await db.query(
     `SELECT COUNT(*) c FROM otp_verifications WHERE target=? AND purpose=? AND created_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 HOUR)`,
-    [phone, purpose]
+    [target, purpose]
   ).catch(() => [{ c: 0 }]);
   if (Number(hourly[0]?.c || 0) >= Number(process.env.OTP_MAX_PER_HOUR || 8)) {
     throw ApiError.tooMany('Too many verification codes requested. Please try again later.');
   }
-  const code = (config.nodeEnv !== 'production' && process.env.OTP_DEV_FIXED_CODE) ? String(process.env.OTP_DEV_FIXED_CODE) : generateCode();
-  const codeHash = hashCode(code);
-  const appName = config.appName || 'ZenjiGO';
-  const text = `${appName} verification code: ${code}. Valid for ${OTP_TTL_MINUTES} minutes. Do not share this code.`;
-  const result = await sendSms({ to: phone, content: text });
-  const messageId = result.jobId || `SMS-${Date.now()}`;
-  await db.query('UPDATE otp_verifications SET status="cancelled" WHERE target=? AND purpose=? AND status="pending"', [phone, purpose]);
+}
+
+async function storeCode({ target, channel, purpose, messageId, codeHash }) {
+  await db.query('UPDATE otp_verifications SET status="cancelled" WHERE target=? AND purpose=? AND status="pending"', [target, purpose]);
   await db.query(
     `INSERT INTO otp_verifications(target, channel, purpose, provider_sid, code_hash, last_sent_at, expires_at)
      VALUES(?,?,?,?,?,UTC_TIMESTAMP(), DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? MINUTE))`,
-    [phone, 'sms', purpose, messageId, codeHash, OTP_TTL_MINUTES]
+    [target, channel, purpose, messageId, codeHash, OTP_TTL_MINUTES]
   );
+}
+
+function chooseCode() {
+  return (config.nodeEnv !== 'production' && process.env.OTP_DEV_FIXED_CODE) ? String(process.env.OTP_DEV_FIXED_CODE) : generateCode();
+}
+
+async function sendBySms({ target, purpose, userId }) {
+  const phone = normalizePhone(target);
+  if (!isValidPhone(phone)) {
+    throw ApiError.badRequest('A valid phone number is required for SMS OTP.');
+  }
+  await enforceLimits(phone, purpose);
+  const code = chooseCode();
+  const codeHash = hashCode(code);
+  const appName = config.appName || 'ZenjiGO';
+  const text = `${appName} verification code: ${code}. Valid for ${OTP_TTL_MINUTES} minutes. Do not share this code.${autofillSuffix(code)}`;
+  let messageId;
+  const smsConfigured = Boolean(String(config.briq?.apiKey || '').trim());
+  if (!smsConfigured && config.nodeEnv !== 'production' && process.env.OTP_ALLOW_CONSOLE === 'true') {
+    console.warn(`[OTP DEV CONSOLE] sms target=${logPhone(phone)} purpose=${purpose} (code not logged)`);
+    messageId = `DEV-CONSOLE-${Date.now()}`;
+  } else {
+    const result = await sendSms({ to: phone, content: text, category: 'otp', template: `otp_${purpose}`, userId });
+    messageId = result.jobId || `SMS-${Date.now()}`;
+  }
+  await storeCode({ target: phone, channel: 'sms', purpose, messageId, codeHash });
   return { sid: messageId, channel: 'sms' };
 }
 
-async function send({ target, purpose = 'login', channel }) {
+async function send({ target, purpose = 'login', channel, userId }) {
   const ch = String(channel || 'email').toLowerCase();
-  if (ch === 'sms') return sendBySms({ target, purpose });
+  if (ch === 'sms') return sendBySms({ target, purpose, userId });
   if (ch !== 'email') {
     throw ApiError.badRequest('Unsupported channel. Use sms or email.');
   }
@@ -176,7 +211,7 @@ async function send({ target, purpose = 'login', channel }) {
 }
 
 async function verify({ target, code, purpose = 'login' }) {
-  const email = String(target || '').trim().toLowerCase();
+  const email = normalizeTarget(target);
   const rows = await db.query(
     `SELECT id, code_hash, attempts, expires_at, status FROM otp_verifications
      WHERE target=? AND purpose=? AND status="pending" ORDER BY id DESC LIMIT 1`, [email, purpose]);
@@ -204,7 +239,7 @@ async function verify({ target, code, purpose = 'login' }) {
 }
 
 async function check({ target, code, purpose = 'login' }) {
-  const email = String(target || '').trim().toLowerCase();
+  const email = normalizeTarget(target);
   const rows = await db.query(
     `SELECT id, code_hash, attempts, expires_at, status FROM otp_verifications
      WHERE target=? AND purpose=? AND status="pending" ORDER BY id DESC LIMIT 1`, [email, purpose]);
@@ -226,29 +261,51 @@ async function check({ target, code, purpose = 'login' }) {
 
 
 /**
- * Registration verification survives the multi-step form. A code verified at the
- * email step is stored with status="verified"; final submission accepts that
- * proof for 24 hours rather than trying to consume an already-used/expired OTP.
- * For the web form (which submits the code only at the end), a still-pending
- * valid code is verified here.
+ * Multi-step forms (registration, phone change) verify a contact early and submit later.
+ * A code verified at the early step is kept as status="verified"; the final submission accepts
+ * that proof for 24 hours. If the form only sends the code at the end (web), a still-pending
+ * valid code is verified here instead.
  */
-async function verifyRegistrationForSubmit({ target, code, purpose = 'driver_registration' }) {
-  const email = String(target || '').trim().toLowerCase();
-  if (!email || !email.includes('@')) {
-    throw ApiError.badRequest('A valid email address is required.');
-  }
+async function verifyContactProof({ target, code, purpose, label = 'contact' }) {
+  const t = normalizeTarget(target);
+  if (!t) throw ApiError.badRequest(`A valid ${label} is required.`);
   const verified = await db.query(
     `SELECT id FROM otp_verifications
      WHERE target=? AND purpose=? AND status="verified"
        AND verified_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)
      ORDER BY verified_at DESC, id DESC LIMIT 1`,
-    [email, purpose]
+    [t, purpose]
   );
   if (verified.length) return true;
   if (!String(code || '').trim()) {
-    throw ApiError.badRequest('Please verify your email before submitting the application.');
+    throw ApiError.badRequest(`Please verify your ${label} before continuing.`);
   }
-  return verify({ target: email, code: String(code).trim(), purpose });
+  return verify({ target: t, code: String(code).trim(), purpose });
 }
 
-module.exports = { send, verify, check, verifyRegistrationForSubmit };
+async function verifyRegistrationForSubmit({ target, code, purpose = 'driver_registration' }) {
+  const email = String(target || '').trim().toLowerCase();
+  if (!email || !email.includes('@')) {
+    throw ApiError.badRequest('A valid email address is required.');
+  }
+  return verifyContactProof({ target: email, code, purpose, label: 'email address' });
+}
+
+async function verifyPhoneForSubmit({ target, code, purpose = 'driver_registration_phone' }) {
+  const phone = normalizePhone(target);
+  if (!isValidPhone(phone)) throw ApiError.badRequest('A valid phone number is required.');
+  return verifyContactProof({ target: phone, code, purpose, label: 'phone number' });
+}
+
+/** Verify a code that may have been sent to any one of several targets (e.g. admin email or phone). */
+async function verifyAny({ targets, code, purpose }) {
+  const list = [...new Set((targets || []).map(normalizeTarget).filter(Boolean))];
+  for (const t of list) {
+    const rows = await db.query(
+      'SELECT id FROM otp_verifications WHERE target=? AND purpose=? AND status="pending" ORDER BY id DESC LIMIT 1', [t, purpose]);
+    if (rows.length) return verify({ target: t, code, purpose });
+  }
+  throw ApiError.badRequest('Invalid or expired OTP. Request a new one.');
+}
+
+module.exports = { send, verify, check, verifyRegistrationForSubmit, verifyPhoneForSubmit, verifyContactProof, verifyAny, normalizeTarget };
