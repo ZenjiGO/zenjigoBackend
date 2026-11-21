@@ -1,6 +1,8 @@
 const service=require('../services/ride.service'); const {ok}=require('../utils/response'); const asyncHandler=require('../utils/asyncHandler'); const db=require('../config/db'); const ApiError=require('../utils/ApiError');
 exports.quote=asyncHandler(async(req,res)=>ok(res,await service.quote(req.body)));
 exports.create=asyncHandler(async(req,res)=>ok(res,await service.create(req.user.sub,req.body),'Ride requested',201));
+exports.passengers=asyncHandler(async(req,res)=>ok(res,{passengers:await require('../services/ride.passenger').list(req.user.sub)}));
+exports.removePassenger=asyncHandler(async(req,res)=>ok(res,await require('../services/ride.passenger').remove(req.user.sub,req.params.id),'Removed'));
 exports.list=asyncHandler(async(req,res)=>ok(res,await service.listForUser(req.user.sub,req.user.role,req.query.limit)));
 const lifecycle=require('../services/ride.lifecycle.service');
 /** The caller's current non-finished ride (or null) so apps can resume it after a restart / new device. */

@@ -17,6 +17,7 @@ const EVENT_LABELS = {
   ride_cancelled: 'Ride cancelled',
   ride_no_driver: 'No driver available',
   ride_completed: 'Trip receipt',
+  ride_for_friend: 'Rides booked for a friend (SMS to the passenger)',
   driver_status: 'Driver application approved / rejected / suspended',
   payout_status: 'Payout and commission-due updates',
   wallet_topup: 'Wallet top-up received',

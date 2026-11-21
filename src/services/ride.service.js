@@ -6,6 +6,7 @@ const { notifyUser } = require('./notification.service');
 const finance = require('./driver_finance.service');
 const realtime = require('../utils/realtime');
 const smsEvents = require('./sms.events');
+const passengers = require('./ride.passenger');
 
 /* ------------------------------------------------------------------ *
  * Lifecycle rules (all overridable from .env, evaluated at call time)
@@ -220,6 +221,11 @@ async function create(riderId,input){
  if(crowKm<LIFE.minKm()) throw ApiError.badRequest('Your pickup and destination are the same place. Please choose a different destination.');
  if(crowKm>LIFE.maxKm()) throw ApiError.badRequest(`This trip is too long for a single ride (over ${LIFE.maxKm()} km). Please choose a closer destination.`);
 
+ // "Book for a friend": validated up front so a bad name/number fails before any money or dispatch is touched.
+ const riderRow=(await db.query('SELECT full_name,phone FROM users WHERE id=? LIMIT 1',[riderId]))[0]||{};
+ const passenger=passengers.parsePassenger(input,riderRow);
+ await passengers.assertWithinLimits(riderId,passenger);
+
  const q=await quote(input);
  const tripPin=Math.floor(1000+Math.random()*9000).toString();
  let discount=0;
@@ -253,13 +259,17 @@ async function create(riderId,input){
    // Serialise concurrent bookings from the same rider (double taps, two devices).
    await conn.query('SELECT id FROM users WHERE id=? FOR UPDATE',[riderId]);
    await blockActive(conn);
-   const [r]=await conn.query(`INSERT INTO rides(ride_code,rider_id,ride_type,pickup_address,pickup_lat,pickup_lng,destination_address,destination_lat,destination_lng,estimated_distance_km,estimated_duration_min,estimated_fare,discount,cancellation_fee,payment_method,promo_code,trip_pin,searching_since) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,UTC_TIMESTAMP())`,
-    [code(),riderId,input.rideType,input.pickupAddress,input.pickupLat,input.pickupLng,input.destinationAddress,input.destinationLat,input.destinationLng,q.distanceKm,q.durationMin,q.estimatedFare,discount,priorDebt,payMethod,input.promoCode||null,tripPin]);
-   await conn.query('INSERT INTO ride_events(ride_id,actor_id,event_type,payload) VALUES(?,?,?,?)',[r.insertId,riderId,'requested',JSON.stringify({quote:q,priorDebtApplied:priorDebt,silent:true})]);
+   const [r]=await conn.query(`INSERT INTO rides(ride_code,rider_id,ride_type,pickup_address,pickup_lat,pickup_lng,destination_address,destination_lat,destination_lng,estimated_distance_km,estimated_duration_min,estimated_fare,discount,cancellation_fee,payment_method,promo_code,booked_for_other,passenger_name,passenger_phone,passenger_note,trip_pin,searching_since) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,UTC_TIMESTAMP())`,
+    [code(),riderId,input.rideType,input.pickupAddress,input.pickupLat,input.pickupLng,input.destinationAddress,input.destinationLat,input.destinationLng,q.distanceKm,q.durationMin,q.estimatedFare,discount,priorDebt,payMethod,input.promoCode||null,passenger.bookedForOther?1:0,passenger.name,passenger.phone,passenger.note,tripPin]);
+   await conn.query('INSERT INTO ride_events(ride_id,actor_id,event_type,payload) VALUES(?,?,?,?)',[r.insertId,riderId,'requested',JSON.stringify({quote:q,priorDebtApplied:priorDebt,silent:true,...(passenger.bookedForOther?{bookedForOther:true,passengerName:passenger.name}:{})})]);
    return r.insertId;
  });
  // NOTE: the debt is only cleared when the ride that carries it is completed (see confirmPaymentAndComplete),
  // so an unmatched/cancelled request never silently wipes what the rider owes.
+ if(passenger.bookedForOther){
+   passengers.remember(riderId,passenger);
+   smsEvents.later(smsEvents.sendToPhone(passenger.phone,'ride_booked_for_you',{booker:String(riderRow.full_name||'').trim().split(' ')[0]||'Someone',pickup:String(input.pickupAddress||'').slice(0,60)},{userId:null}));
+ }
  try { await notifyAvailableDrivers(rideId,input.rideType,input.pickupLat,input.pickupLng); } catch (e) { console.warn('[ride] dispatch notify failed:', e.message); }
  return sanitizeRiderRide(await getById(rideId,riderId), riderId);
 }
@@ -272,6 +282,12 @@ function sanitizeRiderRide(ride, viewerUserId) {
   if (isDriver && !isRider) {
     // The trip PIN is a secret the rider reads out to the driver. The driver must never receive it.
     const { trip_pin, tripPin, ...rest } = ride;
+    if (Number(rest.booked_for_other)) {
+      // Booked for someone else: the driver deals with the passenger. The booker's contact details stay private.
+      rest.rider_name = rest.passenger_name || 'Passenger';
+      rest.rider_phone = rest.passenger_phone || null;
+      rest.rider_photo = null;
+    }
     return rest;
   }
   const est = Number(ride.estimated_fare || 0);
@@ -316,7 +332,7 @@ async function getById(id,userId=null){
  const rows=await db.query(`SELECT r.*,ru.full_name rider_name,ru.phone rider_phone,ru.photo_url rider_photo,du.full_name driver_name,du.phone driver_phone,du.photo_url driver_photo,v.type vehicle_type,v.plate_number vehicle_number,v.make vehicle_make,v.model vehicle_model,v.color vehicle_color,d.rating driver_rating,d.total_rides driver_total_rides,d.current_lat driver_lat,d.current_lng driver_lng,d.location_updated_at driver_pinged_at,d.online driver_online FROM rides r JOIN users ru ON ru.id=r.rider_id LEFT JOIN users du ON du.id=r.driver_id LEFT JOIN driver_profiles d ON d.user_id=r.driver_id LEFT JOIN vehicles v ON v.id=r.vehicle_id WHERE r.id=?`,[id]);
  if(!rows.length || (userId && Number(rows[0].rider_id)!==Number(userId) && Number(rows[0].driver_id)!==Number(userId))) throw ApiError.notFound('Ride not found');
  const x=rows[0];
- const ride={...x,estimated_fare:Number(x.estimated_fare),final_fare:x.final_fare==null?null:Number(x.final_fare),discount:Number(x.discount),tip:Number(x.tip),total_paid:Number(x.total_paid),cancellation_fee:Number(x.cancellation_fee||0)};
+ const ride={...x,booked_for_other:Number(x.booked_for_other||0),passenger:passengers.toPublic(x),estimated_fare:Number(x.estimated_fare),final_fare:x.final_fare==null?null:Number(x.final_fare),discount:Number(x.discount),tip:Number(x.tip),total_paid:Number(x.total_paid),cancellation_fee:Number(x.cancellation_fee||0)};
  await attachLiveState(ride);
  return sanitizeRiderRide(ride, userId);
 }
@@ -382,6 +398,8 @@ async function listForUser(userId,role,limit=30){
  const rows=await db.query(`SELECT r.*,du.full_name driver_name,du.photo_url driver_photo,v.type vehicle_type,v.plate_number vehicle_number FROM rides r LEFT JOIN users du ON du.id=r.driver_id LEFT JOIN vehicles v ON v.id=r.vehicle_id WHERE ${col}=? ORDER BY r.created_at DESC LIMIT ?`,[userId,Math.min(Number(limit)||30,100)]);
  return rows.map((x) => sanitizeRiderRide({
    ...x,
+   booked_for_other: Number(x.booked_for_other || 0),
+   passenger: passengers.toPublic(x),
    estimated_fare: Number(x.estimated_fare),
    final_fare: x.final_fare == null ? null : Number(x.final_fare),
    discount: Number(x.discount || 0),
@@ -782,6 +800,8 @@ async function cancelRider(riderId, rideId, reason) {
     );
   }
 
+  notifyPassengerCancelled(x);
+
   // Rider-facing response: do not expose fee amounts (applied silently on next ride).
   const ride = await getById(rideId, riderId);
   return sanitizeRiderRide(ride, riderId);
@@ -808,13 +828,26 @@ async function chargeWallet(userId,amount,type,refId,description){
   const before=Number(w[0].balance),after=before-amount; await conn.query('UPDATE wallets SET balance=? WHERE user_id=?',[after,userId]); await conn.query('INSERT INTO wallet_transactions(user_id,type,amount,balance_before,balance_after,reference_type,reference_id,payment_method,description) VALUES(?,?,?,?,?,?,?,?,?)',[userId,type,-amount,before,after,type,refId,'wallet',description]); return after;
  });
 }
+/** Tells the person a ride was booked for that it will not happen. Takes a `rides` row. Never throws. */
+function notifyPassengerCancelled(row) {
+  if (!row || !Number(row.booked_for_other) || !row.passenger_phone) return;
+  smsEvents.later((async () => {
+    const u = await db.query('SELECT full_name FROM users WHERE id=? LIMIT 1', [row.rider_id]);
+    await smsEvents.sendToPhone(row.passenger_phone, 'ride_cancelled_passenger', {
+      booker: String((u[0] && u[0].full_name) || '').trim().split(' ')[0], code: row.ride_code || ''
+    });
+  })());
+}
+
 /** Looks up the ride + driver details and sends the matching SMS to the rider. Never throws. */
 function smsRideDetails(rideId, template) {
   smsEvents.later((async () => {
     const rows = await db.query(
       `SELECT r.rider_id, r.ride_code, r.trip_pin, r.estimated_fare, r.discount, r.cancellation_fee, r.tip,
+              r.booked_for_other, r.passenger_phone, ru.full_name AS booker_name,
               du.full_name AS driver_name, v.plate_number
          FROM rides r
+         JOIN users ru ON ru.id = r.rider_id
          LEFT JOIN users du ON du.id = r.driver_id
          LEFT JOIN vehicles v ON v.driver_id = r.driver_id AND v.status = 'active'
         WHERE r.id = ? LIMIT 1`, [rideId]);
@@ -825,6 +858,13 @@ function smsRideDetails(rideId, template) {
       driver: String(x.driver_name || '').split(' ')[0], plate: x.plate_number || '', pin: x.trip_pin || '',
       code: x.ride_code || '', total
     });
+    // Booked for a friend: the passenger needs the driver details and PIN too (the driver asks them for it).
+    if (Number(x.booked_for_other) && x.passenger_phone && (template === 'ride_accepted' || template === 'ride_arrived')) {
+      await smsEvents.sendToPhone(x.passenger_phone, `${template}_passenger`, {
+        driver: String(x.driver_name || '').split(' ')[0], plate: x.plate_number || '', pin: x.trip_pin || '',
+        booker: String(x.booker_name || '').trim().split(' ')[0]
+      });
+    }
   })());
 }
 
@@ -957,6 +997,7 @@ async function cancelSystem(rideId, { reason, actorId = null, event = 'auto_canc
     try {
       await pushUser(prev.rider_id, 'Ride cancelled', reason ? String(reason) : 'Your ride was cancelled.', { type: 'ride_status', rideId: String(rideId), status: 'cancelled' });
       smsEvents.later(smsEvents.sendToUser(prev.rider_id,'ride_cancelled',{code:prev.ride_code||''}));
+      notifyPassengerCancelled(prev);
       if (prev.driver_id) await pushUser(prev.driver_id, 'Ride cancelled', reason ? String(reason) : 'This ride was cancelled.', { type: 'ride_cancelled', rideId: String(rideId), status: 'cancelled' });
     } catch (e) { console.warn('[cancelSystem notify]', e.message); }
   }

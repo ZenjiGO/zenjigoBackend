@@ -53,7 +53,7 @@ async function sendOtp({ phone, email, purpose = 'login', role = null }) {
       const targetPhone = normalizePhone(phone);
       const rows = await db.query('SELECT id FROM users WHERE role="rider" AND phone=? LIMIT 1', [targetPhone]);
       if (!rows.length) throw ApiError.badRequest('No rider account uses this phone number.');
-      await otp.send({ target: targetPhone, purpose: purpose || 'login', channel: 'sms', userId: rows[0].id });
+      await otp.send({ target: targetPhone, purpose: purpose || 'login', channel: 'sms', userId: rows[0].id, role: 'rider' });
       return { target: targetPhone, channel: 'sms', maskedPhone: maskPhone(targetPhone) };
     }
     if (mail && !hasPhone) {
@@ -69,7 +69,7 @@ async function sendOtp({ phone, email, purpose = 'login', role = null }) {
     if (takenPhone.length) throw ApiError.conflict('This phone number is already registered. Please sign in instead.');
     const takenMail = await db.query('SELECT id FROM users WHERE role="rider" AND email=? LIMIT 1', [mail]);
     if (takenMail.length) throw ApiError.conflict('This email is already registered. Please sign in instead.');
-    await otp.send({ target: targetPhone, purpose: 'signup', channel: 'sms' });
+    await otp.send({ target: targetPhone, purpose: 'signup', channel: 'sms', role: 'rider' });
     return { target: targetPhone, channel: 'sms', maskedPhone: maskPhone(targetPhone) };
   }
 
@@ -79,7 +79,7 @@ async function sendOtp({ phone, email, purpose = 'login', role = null }) {
     if (!isValidPhone(targetPhone)) throw ApiError.badRequest('Enter a valid phone number.');
     const rows = await db.query('SELECT id FROM users WHERE role="driver" AND phone=? LIMIT 1', [targetPhone]);
     // Same response whether or not the account exists (no account enumeration).
-    if (rows.length) await otp.send({ target: targetPhone, purpose: 'login', channel: 'sms', userId: rows[0].id });
+    if (rows.length) await otp.send({ target: targetPhone, purpose: 'login', channel: 'sms', userId: rows[0].id, role: 'driver' });
     return { target: targetPhone, channel: 'sms', maskedPhone: maskPhone(targetPhone) };
   }
 
@@ -157,7 +157,7 @@ async function sendDriverPhoneOtp({ phone }) {
   if (!isValidPhone(target)) throw ApiError.badRequest('Enter a valid phone number.');
   const taken = await db.query('SELECT id FROM users WHERE role="driver" AND phone=? LIMIT 1', [target]);
   if (taken.length) throw ApiError.conflict('A driver account already uses this phone number. Please sign in instead.');
-  await otp.send({ target, purpose: 'driver_registration_phone', channel: 'sms' });
+  await otp.send({ target, purpose: 'driver_registration_phone', channel: 'sms', role: 'driver' });
   return { target, channel: 'sms', maskedPhone: maskPhone(target) };
 }
 
@@ -286,7 +286,7 @@ async function sendAdminSmsOtp({ email, password }) {
   const { admin } = await adminWithPassword(email, password);
   const phone = adminSmsPhone(admin);
   if (!phone) throw ApiError.badRequest('SMS sign-in is not available for this admin account. Use the email code.');
-  await otp.send({ target: phone, purpose: 'admin_login', channel: 'sms', userId: admin.id });
+  await otp.send({ target: phone, purpose: 'admin_login', channel: 'sms', userId: admin.id, role: 'admin' });
   return { channel: 'sms', maskedPhone: maskPhone(phone) };
 }
 
@@ -368,7 +368,7 @@ async function sendPhoneChangeOtp({ userId, role, phone }) {
   if (normalizePhone(current.phone) === target) throw ApiError.badRequest('This is already your phone number.');
   const taken = await db.query('SELECT id FROM users WHERE role=? AND phone=? AND id<>? LIMIT 1', [role, target, userId]);
   if (taken.length) throw ApiError.conflict('This phone number is already used by another account.');
-  await otp.send({ target, purpose: 'phone_change', channel: 'sms', userId });
+  await otp.send({ target, purpose: 'phone_change', channel: 'sms', userId, role });
   return { target, channel: 'sms', maskedPhone: maskPhone(target) };
 }
 

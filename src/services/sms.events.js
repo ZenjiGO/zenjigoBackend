@@ -22,6 +22,11 @@ const TEMPLATES = {
   ride_cancelled:  { event: 'ride_cancelled', category: 'ride',    text: (v) => `${APP()}: your ride${v.code ? ' ' + v.code : ''} was cancelled.${v.fee ? ' Cancellation fee: ' + money(v.fee) + '.' : ''}` },
   ride_no_driver:  { event: 'ride_no_driver', category: 'ride',    text: () => `${APP()}: no driver is available right now. Please try again in a few minutes.` },
   ride_completed:  { event: 'ride_completed', category: 'ride',    text: (v) => `${APP()}: trip complete${v.code ? ' (' + v.code + ')' : ''}. Total ${money(v.total)}. Thank you for riding with us!` },
+  // --- "Book for a friend": SMS to the person who is actually riding (the booker keeps their own SMS) ---
+  ride_booked_for_you:      { event: 'ride_for_friend', category: 'ride', text: (v) => `${APP()}: ${v.booker || 'Someone'} booked a ride for you${v.pickup ? ' from ' + v.pickup : ''}. We will text you the driver details once a driver accepts.` },
+  ride_accepted_passenger:  { event: 'ride_for_friend', category: 'ride', text: (v) => `${APP()}: ${v.driver || 'Your driver'}${v.plate ? ' (' + v.plate + ')' : ''} is on the way for the ride ${v.booker || 'a friend'} booked you.${v.pin ? ' Trip PIN: ' + v.pin + '. Tell it only to your driver.' : ''}` },
+  ride_arrived_passenger:   { event: 'ride_for_friend', category: 'ride', text: (v) => `${APP()}: your driver has arrived at pickup.${v.pin ? ' Trip PIN: ' + v.pin + '.' : ''}` },
+  ride_cancelled_passenger: { event: 'ride_for_friend', category: 'ride', text: (v) => `${APP()}: the ride ${v.booker || 'a friend'} booked for you${v.code ? ' (' + v.code + ')' : ''} was cancelled.` },
   ride_request_driver: { event: 'ride_accepted', category: 'ride', text: (v) => `${APP()}: new ride request${v.pickup ? ' from ' + v.pickup : ''}. Open the app to accept.` },
   driver_approved: { event: 'driver_status',  category: 'account', text: () => `${APP()}: congratulations, your driver application is approved. Open the driver app and go online to start earning.` },
   driver_rejected: { event: 'driver_status',  category: 'account', text: (v) => `${APP()}: your driver application was not approved.${v.reason ? ' Reason: ' + v.reason : ''} Open the app for details.` },

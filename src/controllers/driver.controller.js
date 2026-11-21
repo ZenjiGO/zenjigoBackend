@@ -26,6 +26,11 @@ exports.requests=asyncHandler(async(req,res)=>{
  }
  ok(res,{restricted:false,settlementRequired:false,requests:rows});
 });
+exports.demandZones=asyncHandler(async(req,res)=>{
+ let {lat,lng}=req.query;
+ if(lat==null||lng==null){ const me=await db.query('SELECT current_lat,current_lng FROM driver_profiles WHERE user_id=?',[req.user.sub]); if(me.length){lat=me[0].current_lat;lng=me[0].current_lng;} }
+ ok(res,await require('../services/driver.demand.service').demandZones({lat,lng,radiusKm:req.query.radiusKm}));
+});
 exports.accept=asyncHandler(async(req,res)=>ok(res,await ride.accept(req.user.sub,req.params.id),'Ride accepted'));
 exports.status=asyncHandler(async(req,res)=>ok(res,await ride.setStatus(req.user.sub,req.params.id,req.body.status,{otp:req.body.otp,reason:req.body.reason}),'Ride status updated'));
 exports.activeRide=asyncHandler(async(req,res)=>ok(res,{ride:await require('../services/ride.lifecycle.service').getActiveRide(req.user.sub,'driver')}));

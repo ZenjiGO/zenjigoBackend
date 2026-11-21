@@ -44,14 +44,50 @@ function normalizeTarget(target) {
   return value.includes('@') ? value.toLowerCase() : normalizePhone(value);
 }
 
-/** Extra line that lets browsers (WebOTP) and Android (SMS Retriever) auto-fill the code. */
-function autofillSuffix(code) {
+/**
+ * Android SMS Retriever app hashes (11 chars each). Configure either
+ *   OTP_ANDROID_APP_HASH=<hash>[,<hash>...]     (one value, or a comma-separated list), and/or
+ *   OTP_ANDROID_APP_HASH_RIDER / OTP_ANDROID_APP_HASH_DRIVER   (per app, preferred)
+ * The hash depends on the app's package name AND the certificate it is signed with, so the rider app,
+ * the driver app and a Play-App-Signing build each have their own. See scripts/app-hash.sh.
+ */
+const HASH_RE = /^[A-Za-z0-9+/]{11}$/;
+
+function parseHashes(value) {
+  return String(value || '')
+    .split(/[\s,;]+/)
+    .map((h) => h.trim())
+    .filter((h) => HASH_RE.test(h));
+}
+
+function androidHashesFor(role) {
+  const specific = role === 'driver' ? process.env.OTP_ANDROID_APP_HASH_DRIVER
+    : role === 'rider' ? process.env.OTP_ANDROID_APP_HASH_RIDER : '';
+  const own = parseHashes(specific);
+  // An app-specific hash wins; otherwise fall back to every configured hash (still well under 140 bytes).
+  const list = own.length ? own : parseHashes(process.env.OTP_ANDROID_APP_HASH);
+  return [...new Set(list)];
+}
+
+/**
+ * Extra text that lets the phone fill the code in automatically:
+ *  - Android SMS Retriever needs the app hash in the message (we also add the recommended "<#>" prefix),
+ *  - browsers (WebOTP) need a last line "@domain #code".
+ * Both can be present: the hash goes on its own line above the WebOTP line, which must stay last.
+ * Admin messages carry neither.
+ */
+function autofillParts(code, role) {
+  if (role === 'admin') return { prefix: '', suffix: '' };
   const domain = String(process.env.OTP_WEBOTP_DOMAIN || '').trim();
-  const hash = String(process.env.OTP_ANDROID_APP_HASH || '').trim();
-  let out = '';
-  if (domain) out += `\n\n@${domain} #${code}`;
-  else if (hash) out += `\n\n${hash}`;
-  return out;
+  const hashes = androidHashesFor(role);
+  let suffix = '';
+  if (hashes.length) suffix += `\n\n${hashes.join(' ')}`;
+  if (domain) suffix += `\n\n@${domain} #${code}`;
+  return { prefix: hashes.length ? '<#> ' : '', suffix };
+}
+
+function autofillSuffix(code, role) {
+  return autofillParts(code, role).suffix;
 }
 
 function buildEmailHtml({ appName, code, purpose }) {
@@ -121,7 +157,13 @@ function chooseCode() {
   return (config.nodeEnv !== 'production' && process.env.OTP_DEV_FIXED_CODE) ? String(process.env.OTP_DEV_FIXED_CODE) : generateCode();
 }
 
-async function sendBySms({ target, purpose, userId }) {
+function roleFromPurpose(purpose) {
+  if (purpose === 'admin_login') return 'admin';
+  if (String(purpose || '').startsWith('driver_')) return 'driver';
+  return 'rider';
+}
+
+async function sendBySms({ target, purpose, userId, role }) {
   const phone = normalizePhone(target);
   if (!isValidPhone(phone)) {
     throw ApiError.badRequest('A valid phone number is required for SMS OTP.');
@@ -130,7 +172,8 @@ async function sendBySms({ target, purpose, userId }) {
   const code = chooseCode();
   const codeHash = hashCode(code);
   const appName = config.appName || 'ZenjiGO';
-  const text = `${appName} verification code: ${code}. Valid for ${OTP_TTL_MINUTES} minutes. Do not share this code.${autofillSuffix(code)}`;
+  const fill = autofillParts(code, role || roleFromPurpose(purpose));
+  const text = `${fill.prefix}${appName} verification code: ${code}. Valid for ${OTP_TTL_MINUTES} minutes. Do not share this code.${fill.suffix}`;
   let messageId;
   const smsConfigured = Boolean(String(config.briq?.apiKey || '').trim());
   if (!smsConfigured && config.nodeEnv !== 'production' && process.env.OTP_ALLOW_CONSOLE === 'true') {
@@ -144,9 +187,9 @@ async function sendBySms({ target, purpose, userId }) {
   return { sid: messageId, channel: 'sms' };
 }
 
-async function send({ target, purpose = 'login', channel, userId }) {
+async function send({ target, purpose = 'login', channel, userId, role }) {
   const ch = String(channel || 'email').toLowerCase();
-  if (ch === 'sms') return sendBySms({ target, purpose, userId });
+  if (ch === 'sms') return sendBySms({ target, purpose, userId, role });
   if (ch !== 'email') {
     throw ApiError.badRequest('Unsupported channel. Use sms or email.');
   }
@@ -308,4 +351,4 @@ async function verifyAny({ targets, code, purpose }) {
   throw ApiError.badRequest('Invalid or expired OTP. Request a new one.');
 }
 
-module.exports = { send, verify, check, verifyRegistrationForSubmit, verifyPhoneForSubmit, verifyContactProof, verifyAny, normalizeTarget };
+module.exports = { send, verify, check, verifyRegistrationForSubmit, verifyPhoneForSubmit, verifyContactProof, verifyAny, normalizeTarget, autofillSuffix, autofillParts, androidHashesFor };
